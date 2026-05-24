@@ -223,6 +223,43 @@ export function synthesizeFrame(symbols, sampleRate) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Cache of reference chirps for matched-filter detection.
+ *
+ * There are only 4 profiles × 4 bands × 16 symbols = 256 possible reference
+ * chirps for a given sample rate, and they never change.  Synthesizing them on
+ * every detectFrame() call (thousands of Math.sin/exp per chirp, hundreds of
+ * times per second) saturates the main thread and lags the audio pipeline, so
+ * we build them once per sample rate and reuse.
+ *
+ * Layout: _refCache.get(sampleRate)[profileIdx][band][symbol] → Float32Array
+ */
+const _refCache = new Map()
+
+function getReferenceChirps(sampleRate) {
+  let byProfile = _refCache.get(sampleRate)
+  if (byProfile) return byProfile
+
+  byProfile = FRAME_PROFILES.map((prof) =>
+    BANDS.map((band, b) => {
+      const perSymbol = new Array(16)
+      for (let s = 0; s < 16; s++) {
+        const fi        = (s >> 2) & 0x3
+        const mag       = (s >> 1) & 0x1
+        const down      = s & 0x1
+        const sweepIdx  = (down << 1) | mag
+        const fStart    = band.startFreqs[fi]
+        const fEnd      = fStart * band.sweepRatios[sweepIdx]
+        const variation = (s * 3 + b * 7) & 0xF  // same seed the encoder uses
+        perSymbol[s]    = synthesizeChirp(fStart, fEnd, prof.durationMs, sampleRate, variation)
+      }
+      return perSymbol
+    }),
+  )
+  _refCache.set(sampleRate, byProfile)
+  return byProfile
+}
+
+/**
  * Detect symbols in a frame window using matched-filter (dot-product) detection.
  *
  * For each possible profile, tries all 16 symbols per band by correlating the received
@@ -256,6 +293,9 @@ export function detectFrame(samples, sampleRate, diag = null) {
   // degraded real-world frames, and still rejects wrong-profile hits.
   const MIN_FRAME_SCORE = 1500
 
+  // Reference chirps are cached per sample rate (see getReferenceChirps).
+  const refs = getReferenceChirps(sampleRate)
+
   // Try each of the 4 timing profiles; keep the highest-scoring self-consistent candidate.
   // (Shorter profiles can accidentally satisfy the XOR check with wrong symbols;
   // the correct profile always has a much higher total dot-product score.)
@@ -276,22 +316,14 @@ export function detectFrame(samples, sampleRate, diag = null) {
     for (let i = 0; i < dN; i++) frameWin[i] = samples[i] * inv
 
     // For each band, find the symbol (0-15) whose reference chirp best matches
-    // the received frame — matched filter via dot product.
+    // the received frame — matched filter via dot product against cached chirps.
     const syms = [], scores = []
     for (let b = 0; b < 4; b++) {
-      const band = BANDS[b]
+      const bandRefs = refs[p][b]
       let bestDot = -Infinity, bestSym = 0
 
       for (let s = 0; s < 16; s++) {
-        const fi       = (s >> 2) & 0x3              // startFreqIdx
-        const mag      = (s >> 1) & 0x1              // magnitude bit
-        const down     = s & 0x1                     // direction bit
-        const sweepIdx = (down << 1) | mag           // → sweepRatios index
-        const fStart   = band.startFreqs[fi]
-        const fEnd     = fStart * band.sweepRatios[sweepIdx]
-        const variation = (s * 3 + b * 7) & 0xF     // same seed used by encoder
-
-        const ref = synthesizeChirp(fStart, fEnd, prof.durationMs, sampleRate, variation)
+        const ref = bandRefs[s]
         let dot = 0
         for (let i = 0; i < dN; i++) dot += frameWin[i] * ref[i]
         if (dot > bestDot) { bestDot = dot; bestSym = s }
