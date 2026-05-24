@@ -44,7 +44,7 @@ export function encode(text) {
 export async function startListening(audioContext, onMessage) {
   if (!ggwave || instance === null) throw new Error('acousticEngine not initialized')
 
-  await audioContext.audioWorklet.addModule('/mic-worklet.js')
+  await audioContext.audioWorklet.addModule(import.meta.env.BASE_URL + 'mic-worklet.js')
 
   micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
   const source = audioContext.createMediaStreamSource(micStream)

@@ -3,6 +3,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte'
 import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig({
+  base: '/BirdChat/',
   plugins: [
     svelte(),
     VitePWA({
@@ -14,9 +15,10 @@ export default defineConfig({
         theme_color: '#3d7a3d',
         background_color: '#1a2e1a',
         display: 'standalone',
-        start_url: '/',
+        start_url: '/BirdChat/',
+        scope: '/BirdChat/',
         icons: [
-          { src: '/bird.svg', sizes: 'any', type: 'image/svg+xml' }
+          { src: 'bird.svg', sizes: 'any', type: 'image/svg+xml' }
         ]
       }
     })
