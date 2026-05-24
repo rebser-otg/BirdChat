@@ -76,9 +76,12 @@
 
   async function ensureAudio() {
     if (!engineReady) {
-      audioCtx = new AudioContext({ sampleRate: 48000 })
+      // Use the hardware-native sample rate — forcing 48000 can wedge the audio
+      // device on some Linux (PulseAudio/PipeWire) setups so the mic then can't
+      // open.  The codec works at any rate (it's defined in Hz, not samples).
+      audioCtx = new AudioContext()
       try {
-        await init(audioCtx.sampleRate)  // use the actual rate — iOS may give 44100 not 48000
+        await init(audioCtx.sampleRate)  // adapt to whatever rate we got
       } catch (err) {
         initError = '⚠️ Failed to load audio engine. Please reload the page.'
         audioCtx.close()

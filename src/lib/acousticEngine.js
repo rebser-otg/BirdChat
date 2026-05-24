@@ -71,14 +71,20 @@ export async function startListening(audioContext, onMessage, onDiag = null) {
   // chirps (noise suppression treats them as background noise).  Auto-gain is the
   // opposite: it lets the mic use more of its dynamic range, which helps a faint
   // received signal (e.g. a phone speaker heard by a laptop mic), so keep it ON.
-  micStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: true,
-    },
-    video: false,
-  })
+  // Some setups reject the constraint object outright — fall back to a plain
+  // audio request (as Meet/Slack do) so the mic still opens.
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: true,
+      },
+      video: false,
+    })
+  } catch {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+  }
   // iOS Safari suspends the AudioContext when the mic stream starts — resume it.
   if (audioContext.state === 'suspended') await audioContext.resume()
   const source = audioContext.createMediaStreamSource(micStream)
