@@ -64,7 +64,7 @@ html, body {
   -webkit-overflow-scrolling: touch;
 }
 .chat:empty::after {
-  content: '🐦 Listening for birds…';
+  content: '🐦 Type a message below and tap Tweet';
   color: var(--text-dim);
   font-size: 0.9rem;
   text-align: center;
