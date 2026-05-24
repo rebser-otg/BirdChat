@@ -223,115 +223,120 @@ export function synthesizeFrame(symbols, sampleRate) {
 // ---------------------------------------------------------------------------
 
 /**
- * Cache of reference chirps for matched-filter detection.
+ * Per-symbol frequency trajectories for NON-COHERENT detection.
  *
- * There are only 4 profiles × 4 bands × 16 symbols = 256 possible reference
- * chirps for a given sample rate, and they never change.  Synthesizing them on
- * every detectFrame() call (thousands of Math.sin/exp per chirp, hundreds of
- * times per second) saturates the main thread and lags the audio pipeline, so
- * we build them once per sample rate and reuse.
+ * Detection measures how much signal energy follows each candidate chirp's
+ * frequency path (via Goertzel over short sub-windows), rather than correlating
+ * against a phase-exact reference waveform.  A coherent matched filter collapses
+ * with even ~2 ms of timing error, but the preamble is only located to ~30 ms —
+ * so coherent detection fails on real (non-sample-exact) acoustic transmission.
+ * Energy-along-trajectory is phase-insensitive and tolerant to tens of ms of
+ * misalignment.
  *
- * Layout: _refCache.get(sampleRate)[profileIdx][band][symbol] → Float32Array
+ * For each band/symbol we precompute the chirp's centre frequency in each of
+ * NONCOH_K equal sub-windows of the fixed-length frame.
+ *
+ * Layout: _trajCache.get(sampleRate) = { tbl[band][symbol] → Float64Array(K), dN, L }
  */
-const _refCache = new Map()
+const NONCOH_K = 16   // sub-windows across the frame (sweep tracking vs. freq resolution)
+const _trajCache = new Map()
 
-function getReferenceChirps(sampleRate) {
-  let byProfile = _refCache.get(sampleRate)
-  if (byProfile) return byProfile
+function getSymbolTrajectories(sampleRate) {
+  const cached = _trajCache.get(sampleRate)
+  if (cached) return cached
 
-  byProfile = FRAME_PROFILES.map((prof) =>
-    BANDS.map((band, b) => {
-      const perSymbol = new Array(16)
-      for (let s = 0; s < 16; s++) {
-        const fi        = (s >> 2) & 0x3
-        const mag       = (s >> 1) & 0x1
-        const down      = s & 0x1
-        const sweepIdx  = (down << 1) | mag
-        const fStart    = band.startFreqs[fi]
-        const fEnd      = fStart * band.sweepRatios[sweepIdx]
-        const variation = (s * 3 + b * 7) & 0xF  // same seed the encoder uses
-        perSymbol[s]    = synthesizeChirp(fStart, fEnd, prof.durationMs, sampleRate, variation)
+  const dN = Math.round(sampleRate * FRAME_PROFILES[0].durationMs / 1000)
+  const L  = Math.floor(dN / NONCOH_K)
+  const tbl = BANDS.map((band) => {
+    const perSymbol = new Array(16)
+    for (let s = 0; s < 16; s++) {
+      const fi       = (s >> 2) & 0x3
+      const mag      = (s >> 1) & 0x1
+      const down     = s & 0x1
+      const sweepIdx = (down << 1) | mag
+      const fStart   = band.startFreqs[fi]
+      const fEnd     = fStart * band.sweepRatios[sweepIdx]
+      const logR     = Math.log(Math.max(fEnd, 1) / Math.max(fStart, 1))
+      const freqs    = new Float64Array(NONCOH_K)
+      for (let k = 0; k < NONCOH_K; k++) {
+        const tCenter = (k + 0.5) * L
+        freqs[k] = fStart * Math.exp(logR * tCenter / dN)
       }
-      return perSymbol
-    }),
-  )
-  _refCache.set(sampleRate, byProfile)
-  return byProfile
+      perSymbol[s] = freqs
+    }
+    return perSymbol
+  })
+
+  const entry = { tbl, dN, L }
+  _trajCache.set(sampleRate, entry)
+  return entry
+}
+
+// Goertzel power at one frequency over a sub-window samples[start, start+len).
+function goertzelAt(samples, start, len, freq, sampleRate) {
+  const k = Math.round(len * freq / sampleRate)
+  const coeff = 2 * Math.cos(2 * Math.PI * k / len)
+  let s1 = 0, s2 = 0
+  for (let i = 0; i < len; i++) {
+    const s0 = samples[start + i] + coeff * s1 - s2
+    s2 = s1; s1 = s0
+  }
+  return s1 * s1 + s2 * s2 - coeff * s1 * s2
 }
 
 /**
- * Detect symbols in a frame window using matched-filter (dot-product) detection.
+ * Detect the four band symbols in a frame window via non-coherent (energy along
+ * each chirp's frequency trajectory) detection.  Phase-insensitive and tolerant
+ * to timing misalignment, unlike a coherent matched filter.
  *
- * For each possible profile, tries all 16 symbols per band by correlating the received
- * frame against synthesized reference chirps. This is robust against cross-band
- * interference — simultaneous chirps from other bands have different phase trajectories
- * and thus low correlation with the reference for each band.
- *
- * Self-consistency check: computed profileIdx (from XOR of detected symbols) must equal
- * the profile that was tried. Exactly one profile satisfies this for clean audio.
- *
- * @param {Float32Array} samples  — window >= max chirp duration (160 ms = 7680 samples at 48 kHz)
+ * @param {Float32Array} samples  — window ≥ one fixed-length chirp
  * @param {number} sampleRate
- * @returns {number[]|null}  [sym0, sym1, sym2, sym3] or null if unresolvable / silent
+ * @param {{score:number,bands:number[]}} [diag]  — filled with the detection score
+ * @returns {number[]|null}  [sym0, sym1, sym2, sym3] or null if silent
  */
-// Correlation stride: skip samples in the matched-filter dot product.  All chirp
-// frequencies are < ~4 kHz, so a stride of 4 (≈12 kHz effective at 48 kHz) is
-// well above Nyquist and ~4× faster — important to stay real-time on slow CPUs.
-const CORR_STRIDE = 4
-
 export function detectFrame(samples, sampleRate, diag = null) {
-  if (diag) { diag.score = 0; diag.bands = [0, 0, 0, 0] }  // diagnostics: best total + per-band
-  const SILENCE_N = Math.round(sampleRate * 30 / 1000)  // 30 ms for silence check
+  if (diag) { diag.score = 0; diag.bands = [0, 0, 0, 0] }
+  const SILENCE_N = Math.round(sampleRate * 30 / 1000)
 
-  // True-silence guard: only reject windows that are essentially digital silence.
-  // Real (quiet) recordings can be ~10× lower amplitude than synthesized PCM, so
-  // we must NOT reject on absolute amplitude here — the RMS-normalized matched
-  // filter below is what actually distinguishes signal from noise.
+  // True-silence guard (digital silence only — quiet real audio must pass).
   let energy = 0
   for (let i = 0; i < Math.min(SILENCE_N, samples.length); i++) energy += samples[i] * samples[i]
   if (energy < 1e-7) return null
 
-  // Minimum RMS-normalized matched-filter score for a valid detection.
-  // Because the frame window is normalized to unit RMS before correlation, the
-  // score is amplitude-independent: a clean frame scores ~10000, a noise window
-  // ~450.  1500 (≈3× above noise) stays sensitive to degraded real-world frames
-  // while rejecting noise.
-  const MIN_FRAME_SCORE = 1500
-
-  // Single fixed timing profile — reference chirps cached per sample rate.
-  const refs = getReferenceChirps(sampleRate)[0]
-  const dN = Math.round(sampleRate * FRAME_PROFILES[0].durationMs / 1000)
+  const { tbl, dN, L } = getSymbolTrajectories(sampleRate)
   if (samples.length < dN) return null
 
-  // Normalize the frame window to unit RMS so detection is amplitude-independent.
-  const frameWin = new Float32Array(dN)
+  // Normalize the window to unit RMS so detection is amplitude-independent.
+  const win = new Float32Array(dN)
   let sumSq = 0
   for (let i = 0; i < dN; i++) sumSq += samples[i] * samples[i]
   const rms = Math.sqrt(sumSq / dN)
   if (rms < 1e-6) return null
   const inv = 1 / rms
-  for (let i = 0; i < dN; i++) frameWin[i] = samples[i] * inv
+  for (let i = 0; i < dN; i++) win[i] = samples[i] * inv
 
-  // For each band, find the symbol (0-15) whose reference chirp best matches the
-  // received frame — matched filter via strided dot product against cached chirps.
+  // For each band, pick the symbol whose frequency trajectory captures the most
+  // energy (summed Goertzel power over the K sub-windows).
   const syms = [], scores = []
   for (let b = 0; b < BANDS.length; b++) {
-    const bandRefs = refs[b]
-    let bestDot = -Infinity, bestSym = 0
+    const bandTraj = tbl[b]
+    let best = -Infinity, bestSym = 0
     for (let s = 0; s < 16; s++) {
-      const ref = bandRefs[s]
-      let dot = 0
-      for (let i = 0; i < dN; i += CORR_STRIDE) dot += frameWin[i] * ref[i]
-      dot *= CORR_STRIDE
-      if (dot > bestDot) { bestDot = dot; bestSym = s }
+      const freqs = bandTraj[s]
+      let e = 0
+      for (let k = 0; k < NONCOH_K; k++) {
+        e += goertzelAt(win, k * L, L, freqs[k], sampleRate)
+      }
+      if (e > best) { best = e; bestSym = s }
     }
     syms[b] = bestSym
-    scores[b] = bestDot
+    scores[b] = best
   }
 
+  // Always return the best-match symbols (score reported via diag).  Once locked
+  // onto a message, every fixed slot is a frame and is decoded in place.
   const score = scores.reduce((a, c) => a + c, 0)
   if (diag) { diag.score = score; diag.bands = scores.slice() }
-  if (score < MIN_FRAME_SCORE) return null
   return syms
 }
 
@@ -448,16 +453,20 @@ export function createDecoder(sampleRate, onBytes, onEvent = null) {
   const PREAMBLE_THRESHOLD = 150
   const SILENCE_FLOOR      = 1e-7  // total window energy below this = digital silence
 
-  // After a preamble, if this many full-window frame detections fail in a row,
-  // assume the data isn't coming and return to IDLE so a fresh preamble re-triggers.
-  const MAX_FRAME_MISSES = 12
+  // Fine-alignment search: the preamble is located only to within ANALYSIS_N, so
+  // the frame grid can sit at a variable offset.  Once, at the first frame, we
+  // search ±ALIGN_W around the coarse cursor for the offset that maximizes the
+  // frame match, then lock the grid there.  Without this, every frame (including
+  // the critical length frame) is read at a constant offset → frequent errors.
+  const ALIGN_W    = ANALYSIS_N             // ± search range (≈30 ms)
+  const ALIGN_STEP = Math.max(1, Math.round(sampleRate * 0.004))  // ≈4 ms resolution
 
   // State
   let state = 'IDLE'
   let payloadLen = 0
   let decodedBytes = []
   let framesRemaining = 0
-  let frameMisses = 0
+  let alignDone = false   // has the frame grid been fine-aligned to this preamble?
 
   // Linear buffer (grows as chunks arrive; trimmed after each push)
   let buf = new Float32Array(0)
@@ -504,8 +513,12 @@ export function createDecoder(sampleRate, onBytes, onEvent = null) {
     if (preambleRatio(cursor) > PREAMBLE_THRESHOLD) {
       // Verify second preamble at expected offset
       if (preambleRatio(cursor + PREAMBLE_SLOT_N) > PREAMBLE_THRESHOLD) {
-        cursor += 2 * PREAMBLE_SLOT_N + POST_GAP_N
+        // Land ALIGN_W *before* the expected first-frame start so the alignment
+        // search below only reads forward (the buffer is trimmed at cursor between
+        // pushes, so samples before cursor aren't retained).
+        cursor += 2 * PREAMBLE_SLOT_N + POST_GAP_N - ALIGN_W
         state = 'READING_LEN'
+        alignDone = false   // coarse-align the grid on the first frame
         emit('preamble')
         return true
       }
@@ -534,29 +547,34 @@ export function createDecoder(sampleRate, onBytes, onEvent = null) {
       // Fall through: gap fully drained, attempt detection immediately
     }
 
-    // — Phase 2: detection (always on a full MAX_CHIRP_N window) —
+    // — Phase 2: one-time coarse alignment of the frame grid to the preamble —
+    // The preamble is located only to ±ANALYSIS_N, leaving the grid off by up to
+    // ~30 ms.  The non-coherent detection score peaks sharply at true alignment
+    // (and, unlike a coherent score, is NOT inflated by windows containing
+    // silence), so we slide a window forward over [0, 2·ALIGN_W] (cursor was
+    // backed up by ALIGN_W at the preamble) and lock to the max-score offset.
+    if (!alignDone) {
+      if (available() < 2 * ALIGN_W + MAX_CHIRP_N) return false
+      let bestOff = 0, bestScore = -Infinity
+      for (let off = 0; off <= 2 * ALIGN_W; off += ALIGN_STEP) {
+        const d = { score: 0, bands: null }
+        detectFrame(buf.subarray(cursor + off, cursor + off + MAX_CHIRP_N), sampleRate, d)
+        if (d.score > bestScore) { bestScore = d.score; bestOff = off }
+      }
+      cursor += bestOff
+      alignDone = true
+    }
+
+    // — Phase 3: detect the fixed slot, decode it in place, advance a full slot —
     if (available() < MAX_CHIRP_N) return false
 
-    const window = buf.slice(cursor, cursor + MAX_CHIRP_N)
-    const diag   = onEvent ? { score: 0 } : null
-    const syms   = detectFrame(window, sampleRate, diag)
+    const diag = onEvent ? { score: 0, bands: [0, 0, 0, 0] } : null
+    // Always decode (null only on true silence → treat as a garbage frame).  Once
+    // locked onto a message, every fixed slot is a frame; decoding in place keeps
+    // the grid aligned, so a low-confidence frame can't desync the rest.
+    const syms = detectFrame(buf.subarray(cursor, cursor + MAX_CHIRP_N), sampleRate, diag) || [0, 0, 0, 0]
+    if (diag) emit('frame-score', { total: Math.round(diag.score), bands: diag.bands.map(Math.round) })
 
-    if (!syms) {
-      // No detection on a full window: report how strong the (rejected) match was,
-      // then advance.  A score just under threshold means the signal is present
-      // but marginal; a near-noise score means the data bands aren't surviving.
-      if (diag) emit('frame-score', { total: Math.round(diag.score), bands: diag.bands.map(Math.round) })
-      cursor += ANALYSIS_N
-      // If we keep missing right after a preamble, the length frame isn't coming —
-      // give up and return to IDLE so the next transmission's preamble re-triggers.
-      if (++frameMisses >= MAX_FRAME_MISSES) { _reset() }
-      return true
-    }
-    frameMisses = 0
-
-    // Frame detected — consume the (fixed-length) chirp portion and queue the gap.
-    // Fixed timing means a misread frame can't change how far we advance, so the
-    // stream stays aligned regardless of symbol errors.
     const chirpN = Math.round(sampleRate * FRAME_PROFILES[0].durationMs / 1000)
     const gapN   = Math.round(sampleRate * FRAME_PROFILES[0].gapMs    / 1000)
     const b0 = (syms[0] << 4) | syms[1]
@@ -581,7 +599,6 @@ export function createDecoder(sampleRate, onBytes, onEvent = null) {
     if (state === 'READING_DATA') {
       decodedBytes.push(b0, b1)
       framesRemaining--
-      emit('frame')
       if (framesRemaining === 0) state = 'READING_CHECKSUM'
       return true
     }
@@ -613,7 +630,7 @@ export function createDecoder(sampleRate, onBytes, onEvent = null) {
     decodedBytes  = []
     framesRemaining = 0
     skipRemaining   = 0
-    frameMisses     = 0
+    alignDone       = false
   }
 
   return {
