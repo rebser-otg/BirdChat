@@ -6,6 +6,9 @@
   import { pack, MAX_TEXT_LENGTH } from './lib/messageCodec.js'
   import './app.css'
 
+  // Build version (injected at build time) — lets you confirm the latest code is live
+  const VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev'
+
   // --- State ---
   let senderName = $state(localStorage.getItem('birdchat_name') || 'Bird')
   let inputText = $state('')
@@ -219,6 +222,9 @@
       Tweet 🐦
     </button>
   </footer>
+
+  <!-- Build version — verify the device is running the latest deployed code -->
+  <div class="version">v {VERSION}</div>
 </div>
 
 <style>
@@ -271,4 +277,11 @@
   }
   .diag-event { padding: 1px 0; }
   .diag-hint { margin-top: 6px; opacity: 0.6; }
+  .version {
+    text-align: center;
+    font-size: 0.7rem;
+    opacity: 0.5;
+    padding: 4px 0 6px;
+    font-variant-numeric: tabular-nums;
+  }
 </style>
