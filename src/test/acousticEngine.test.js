@@ -53,15 +53,17 @@ describe('encode', () => {
     expect(result).toBeInstanceOf(Float32Array)
   })
 
-  it('calls ggwave.encode with AUDIBLE_FAST protocol', async () => {
+  it('returns a non-trivial Float32Array (birdCodec produces real audio)', async () => {
+    await init()
+    // birdCodec generates preamble + frames — even a short message is thousands of samples
+    const result = encode('hi')
+    expect(result.length).toBeGreaterThan(10000)
+  })
+
+  it('does not call ggwave.encode (encode path uses birdCodec now)', async () => {
     await init()
     encode('test')
-    expect(mockGgwave.encode).toHaveBeenCalledWith(
-      mockInstance,
-      'test',
-      mockProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FAST,
-      50
-    )
+    expect(mockGgwave.encode).not.toHaveBeenCalled()
   })
 })
 

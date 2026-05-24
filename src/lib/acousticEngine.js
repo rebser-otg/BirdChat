@@ -1,7 +1,7 @@
 import ggwaveFactory from 'ggwave'
+import { encode as birdEncode } from './birdCodec.js'
 import { unpack } from './messageCodec.js'
 
-const VOLUME = 50
 const DEFAULT_SAMPLE_RATE = 48000
 
 let ggwave = null
@@ -28,19 +28,16 @@ export async function init(sampleRate = DEFAULT_SAMPLE_RATE) {
 }
 
 /**
- * Encode a packed message string into PCM audio samples.
+ * Encode a packed message string into PCM audio samples using the bird chirp codec.
  * @param {string} text — output of messageCodec.pack()
- * @returns {Float32Array} PCM samples at 48 kHz
+ * @returns {Float32Array} PCM samples (bird chirps)
  */
 export function encode(text) {
-  if (!ggwave || instance === null) throw new Error('acousticEngine not initialized')
-  const raw = ggwave.encode(instance, text, ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FAST, VOLUME)
-  // ggwave returns raw int16 PCM as a byte array (2 bytes per sample).
-  // Web Audio API needs normalized Float32 in [-1, 1] — convert here.
-  const int16 = new Int16Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength))
-  const pcm = Float32Array.from(int16, s => s / 32768.0)
-  // Suppress acoustic loopback: mute decode during transmission + 1s buffer for room reverb
-  _muteUntil = Date.now() + (pcm.length / _sampleRate) * 1000 + 1000
+  if (instance === null) throw new Error('acousticEngine not initialized')
+  const bytes = new TextEncoder().encode(text)
+  const pcm   = birdEncode(bytes, _sampleRate)
+  // Suppress acoustic loopback: mute decode during transmission + 0.5s buffer for room reverb
+  _muteUntil = Date.now() + (pcm.length / _sampleRate) * 1000 + 500
   return pcm
 }
 
