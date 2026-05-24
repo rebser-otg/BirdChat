@@ -26,8 +26,17 @@ export const FRAME_SLOT_MS      = SYMBOL_DURATION_MS + SYMBOL_GAP_MS
 
 // ---------------------------------------------------------------------------
 // Band definitions
-// 4 bands, each with 4 start-frequencies × 4 sweep-ratios = 16 symbols (4 bits).
-// symbol = (startFreqIdx << 2) | sweepIdx
+// 4 bands, each with 4 start-frequencies × 4 sweep profiles = 16 symbols (4 bits).
+//
+// Symbol bit layout (4 bits):
+//   bits [3:2] — startFreqIdx  (which of the 4 start pitches)
+//   bit  [1]   — magnitude     (0 = small sweep, 1 = big sweep)
+//   bit  [0]   — direction     (0 = upward sweep,  1 = downward sweep)
+//
+// Bit 0 (direction) is uniformly distributed for any real data, so every frame
+// has ~50 % upward chirps and ~50 % downward chirps regardless of message content.
+// sweepRatios index: 0 = smallUP, 1 = bigUP, 2 = smallDOWN, 3 = bigDOWN
+//
 // Bands are non-overlapping so 4 simultaneous chirps don't confuse the decoder.
 // ---------------------------------------------------------------------------
 
@@ -63,32 +72,36 @@ export const POST_PREAMBLE_GAP_MS = 100   // silence before first data frame
 
 /**
  * Synthesize a single chirp sweeping exponentially from fStart to fEnd.
- * Envelope: 10 ms linear attack, sustain, 25 ms exponential decay.
- * Includes a 2nd harmonic at −12 dB for tonal richness.
  *
- * @param {number} fStart  Starting frequency in Hz
- * @param {number} fEnd    Ending frequency in Hz
+ * @param {number} fStart      Starting frequency in Hz
+ * @param {number} fEnd        Ending frequency in Hz
  * @param {number} durationMs
  * @param {number} sampleRate
+ * @param {number} [variation=0]  0–15: deterministic seed for organic envelope variation.
+ *   Varies attack (6–12 ms), decay (18–33 ms), and 2nd-harmonic amplitude (10–27 %)
+ *   so no two chirp types sound identical. Pass 0 for a canonical, reproducible chirp.
  * @returns {Float32Array}
  */
-export function synthesizeChirp(fStart, fEnd, durationMs, sampleRate) {
-  const n        = Math.round(sampleRate * durationMs / 1000)
-  const attackN  = Math.round(sampleRate * 0.010)  // 10 ms
-  const decayN   = Math.round(sampleRate * 0.025)  // 25 ms
-  const logRatio = Math.log(Math.max(fEnd, 1) / Math.max(fStart, 1))
+export function synthesizeChirp(fStart, fEnd, durationMs, sampleRate, variation = 0) {
+  const n = Math.round(sampleRate * durationMs / 1000)
 
+  // Organic variation: attack 6–12 ms, decay 18–33 ms, harmonic 10–27 %
+  const attackN  = Math.round(sampleRate * (0.006 + ( variation       & 0x3) * 0.002))
+  const decayN   = Math.round(sampleRate * (0.018 + ((variation >> 2) & 0x3) * 0.005))
+  const harmAmp  = 0.10 + ((variation >> 1) & 0x7) * 0.025
+
+  const logRatio = Math.log(Math.max(fEnd, 1) / Math.max(fStart, 1))
   const pcm = new Float32Array(n)
   let phase1 = 0  // fundamental
   let phase2 = 0  // 2nd harmonic
 
   for (let i = 0; i < n; i++) {
-    const freq = fStart * Math.exp(logRatio * i / n)
+    const freq   = fStart * Math.exp(logRatio * i / n)
     const dPhase = 2 * Math.PI * freq / sampleRate
     phase1 = (phase1 + dPhase) % (2 * Math.PI)
     phase2 = (phase2 + dPhase * 2) % (2 * Math.PI)
 
-    // Amplitude envelope
+    // Amplitude envelope: linear attack → sustain → exponential decay
     let amp
     const fromEnd = n - 1 - i
     if (i < attackN) {
@@ -99,8 +112,7 @@ export function synthesizeChirp(fStart, fEnd, durationMs, sampleRate) {
       amp = 1.0
     }
 
-    // Fundamental + 2nd harmonic at 0.25 (−12 dB)
-    pcm[i] = (Math.sin(phase1) + Math.sin(phase2) * 0.25) * amp
+    pcm[i] = (Math.sin(phase1) + Math.sin(phase2) * harmAmp) * amp
   }
 
   return pcm
@@ -133,13 +145,18 @@ export function synthesizeFrame(symbols, sampleRate) {
   const frame  = new Float32Array(chirpN + gapN)  // gap portion stays zero
 
   for (let b = 0; b < 4; b++) {
-    const sym          = symbols[b] & 0xF          // clamp to 4 bits
-    const startFreqIdx = (sym >> 2) & 0x3          // bits [3:2]
-    const sweepIdx     = sym & 0x3                 // bits [1:0]
+    const sym          = symbols[b] & 0xF           // clamp to 4 bits
+    const startFreqIdx = (sym >> 2) & 0x3           // bits [3:2]: start pitch
+    const magnitude    = (sym >> 1) & 0x1           // bit  [1]:   0=small, 1=big
+    const isDown       = sym & 0x1                  // bit  [0]:   0=upward, 1=downward
+    const sweepIdx     = (isDown << 1) | magnitude  // → 0=smallUP 1=bigUP 2=smallDOWN 3=bigDOWN
     const band         = BANDS[b]
     const fStart       = band.startFreqs[startFreqIdx]
     const fEnd         = fStart * band.sweepRatios[sweepIdx]
-    const chirp        = synthesizeChirp(fStart, fEnd, SYMBOL_DURATION_MS, sampleRate)
+    // Deterministic per-chirp variation: makes each of the 64 (4 bands × 16 symbols) chirps
+    // have a slightly different envelope/harmonic character — no two chirps sound identical.
+    const variation    = (sym * 3 + b * 7) & 0xF
+    const chirp        = synthesizeChirp(fStart, fEnd, SYMBOL_DURATION_MS, sampleRate, variation)
 
     for (let i = 0; i < chirpN; i++) frame[i] += chirp[i]
   }
