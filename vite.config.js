@@ -16,7 +16,7 @@ export default defineConfig({
         display: 'standalone',
         start_url: '/',
         icons: [
-          { src: '/vite.svg', sizes: 'any', type: 'image/svg+xml' }
+          { src: '/bird.svg', sizes: 'any', type: 'image/svg+xml' }
         ]
       }
     })
