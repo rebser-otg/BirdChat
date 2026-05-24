@@ -6,7 +6,9 @@ const mockProtocolId = { GGWAVE_PROTOCOL_AUDIBLE_FAST: 2 }
 const mockGgwave = {
   getDefaultParameters: vi.fn(() => ({ sampleRateInp: 0, sampleRateOut: 0 })),
   init: vi.fn(() => mockInstance),
-  encode: vi.fn(() => new Float32Array([0.1, 0.2, 0.3])),
+  // Real ggwave.encode() returns raw int16 PCM as a byte array (Int8Array from Emscripten).
+  // Simulate 3 samples: Int16Array → view as Int8Array bytes.
+  encode: vi.fn(() => new Int8Array(new Int16Array([10000, -10000, 5000]).buffer)),
   decode: vi.fn(() => null),
   ProtocolId: mockProtocolId,
 }
@@ -58,7 +60,7 @@ describe('encode', () => {
       mockInstance,
       'test',
       mockProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FAST,
-      10
+      50
     )
   })
 })

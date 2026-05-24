@@ -1,7 +1,7 @@
 import ggwaveFactory from 'ggwave'
 import { unpack } from './messageCodec.js'
 
-const VOLUME = 10
+const VOLUME = 50
 const SAMPLE_RATE = 48000
 
 let ggwave = null
@@ -29,7 +29,11 @@ export async function init() {
  */
 export function encode(text) {
   if (!ggwave || instance === null) throw new Error('acousticEngine not initialized')
-  const pcm = ggwave.encode(instance, text, ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FAST, VOLUME)
+  const raw = ggwave.encode(instance, text, ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FAST, VOLUME)
+  // ggwave returns raw int16 PCM as a byte array (2 bytes per sample).
+  // Web Audio API needs normalized Float32 in [-1, 1] — convert here.
+  const int16 = new Int16Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength))
+  const pcm = Float32Array.from(int16, s => s / 32768.0)
   // Suppress acoustic loopback: mute decode during transmission + 1s buffer for room reverb
   _muteUntil = Date.now() + (pcm.length / SAMPLE_RATE) * 1000 + 1000
   return pcm
