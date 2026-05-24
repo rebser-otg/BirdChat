@@ -67,14 +67,15 @@ export async function startListening(audioContext, onMessage, onDiag = null) {
 
   await audioContext.audioWorklet.addModule(import.meta.env.BASE_URL + 'mic-worklet.js')
 
-  // Disable the browser's voice-call DSP — echo cancellation, noise suppression
-  // and auto-gain all filter/distort a data-over-sound signal (noise suppression
-  // in particular treats the chirps as background noise and strips them out).
+  // Echo cancellation and noise suppression must stay OFF — they filter/strip the
+  // chirps (noise suppression treats them as background noise).  Auto-gain is the
+  // opposite: it lets the mic use more of its dynamic range, which helps a faint
+  // received signal (e.g. a phone speaker heard by a laptop mic), so keep it ON.
   micStream = await navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: false,
       noiseSuppression: false,
-      autoGainControl: false,
+      autoGainControl: true,
     },
     video: false,
   })

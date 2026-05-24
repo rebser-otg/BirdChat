@@ -84,6 +84,9 @@ export const PREAMBLE_DURATION_MS = 200
 export const PREAMBLE_GAP_MS      = 100   // silence between preamble chirps
 export const POST_PREAMBLE_GAP_MS = 100   // silence before first data frame
 
+// Peak amplitude for transmitted chirps — as loud as possible without clipping.
+const TX_PEAK = 0.97
+
 // ---------------------------------------------------------------------------
 // Frequency analysis
 // ---------------------------------------------------------------------------
@@ -169,7 +172,11 @@ export function synthesizePreamble(sampleRate) {
   const gapN   = Math.round(sampleRate * PREAMBLE_GAP_MS / 1000)
   const out    = new Float32Array(chirpN + gapN)  // gap stays zero
   const chirp  = synthesizeChirp(PREAMBLE_FSTART, PREAMBLE_FEND, PREAMBLE_DURATION_MS, sampleRate)
-  out.set(chirp)
+  // Normalize to TX_PEAK (the raw chirp's 2nd harmonic can push it past ±1 and clip).
+  let mx = 0
+  for (const x of chirp) { const a = Math.abs(x); if (a > mx) mx = a }
+  const scale = mx > 0 ? TX_PEAK / mx : 1
+  for (let i = 0; i < chirpN; i++) out[i] = chirp[i] * scale
   return out
 }
 
@@ -204,14 +211,15 @@ export function synthesizeFrame(symbols, sampleRate) {
     for (let i = 0; i < chirpN; i++) frame[i] += chirp[i]
   }
 
-  // Normalize the chirp portion to prevent clipping from 4 summed chirps
+  // Normalize the chirp portion to TX_PEAK — as loud as possible without clipping,
+  // which matters most for the weak link (a phone speaker heard by a laptop mic).
   let maxAmp = 0
   for (let i = 0; i < chirpN; i++) {
     const a = Math.abs(frame[i])
     if (a > maxAmp) maxAmp = a
   }
-  if (maxAmp > 0.88) {
-    const scale = 0.88 / maxAmp
+  if (maxAmp > 0) {
+    const scale = TX_PEAK / maxAmp
     for (let i = 0; i < chirpN; i++) frame[i] *= scale
   }
 

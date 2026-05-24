@@ -34,8 +34,8 @@
       let label
       if (d.name === 'frame-score') {
         const b = d.detail.bands
-        // per-band match strength — reveals whether ALL 4 bands survive or some are dead
-        label = `📶 signal ${d.detail.total} [B0:${b[0]} B1:${b[1]} B2:${b[2]} B3:${b[3]}] (need ≥1500)`
+        // per-band signal strength for each decoded frame
+        label = `📶 signal ${d.detail.total} [B0:${b[0]} B1:${b[1]} B2:${b[2]} B3:${b[3]}]`
       } else {
         label = {
           'preamble':      '🔔 preamble detected',
