@@ -21,26 +21,22 @@
 // ---------------------------------------------------------------------------
 
 /**
- * Four timing profiles for data frames.
+ * Single FIXED frame timing.
  *
- * Profile index = (sym0 ^ sym1 ^ sym2 ^ sym3) & 0x3 — derived entirely from
- * the frame's own data bits, so the timing variation is deterministic and the
- * decoder doesn't need to track it (it re-derives the profile from frequency
- * content it already decoded). This gives free rhythm variation.
+ * Earlier versions derived a per-frame duration from the frame's own data bits
+ * (for "natural rhythm").  That made framing fragile: if one frame's symbols
+ * were misread, the decoder computed the wrong frame length, advanced its read
+ * cursor by the wrong amount, and every subsequent frame desynced — so a single
+ * bad frame destroyed the rest of the message.  A fixed length means a misread
+ * frame only corrupts itself (caught by the checksum); the stream stays aligned.
  *
- * Durations are long (300–450 ms): the matched filter's SNR scales with
- * integration time, so longer chirps are dramatically more robust over a real
- * acoustic link.  Measured on a marginal channel, per-band symbol error fell
- * from ~5 % at 160 ms to ~0.2 % at 400 ms.  Throughput drops to ~3 bytes/s,
- * which is fine for short chat messages and worth the reliability.
- *
- * Average slot across equally-likely profiles: (330+385+440+500)/4 = 413.75 ms
+ * 400 ms chirps: the matched filter's SNR scales with integration time, so long
+ * chirps are far more robust over a real acoustic link (per-band symbol error
+ * ~5 % at 160 ms vs ~0.2 % at 400 ms in testing).  Kept as a 1-element array so
+ * the rest of the code (and tests) can stay structured the same way.
  */
 export const FRAME_PROFILES = [
-  { durationMs: 300, gapMs: 30 },  // 0
-  { durationMs: 350, gapMs: 35 },  // 1
-  { durationMs: 400, gapMs: 40 },  // 2
-  { durationMs: 450, gapMs: 50 },  // 3
+  { durationMs: 400, gapMs: 40 },
 ]
 
 // ---------------------------------------------------------------------------
@@ -185,9 +181,8 @@ export function synthesizePreamble(sampleRate) {
  * @returns {Float32Array}  Length = FRAME_SLOT_MS * sampleRate / 1000 samples
  */
 export function synthesizeFrame(symbols, sampleRate) {
-  // Timing profile: derived from XOR of all four symbols — no extra decoder work needed.
-  const profileIdx   = (symbols[0] ^ symbols[1] ^ symbols[2] ^ symbols[3]) & 0x3
-  const { durationMs, gapMs } = FRAME_PROFILES[profileIdx]
+  // Fixed timing — every frame is the same length (see FRAME_PROFILES).
+  const { durationMs, gapMs } = FRAME_PROFILES[0]
   const chirpN = Math.round(sampleRate * durationMs / 1000)
   const gapN   = Math.round(sampleRate * gapMs   / 1000)
   const frame  = new Float32Array(chirpN + gapN)  // gap portion stays zero
@@ -298,70 +293,46 @@ export function detectFrame(samples, sampleRate, diag = null) {
 
   // Minimum RMS-normalized matched-filter score for a valid detection.
   // Because the frame window is normalized to unit RMS before correlation, the
-  // score is amplitude-independent: a clean 4-band frame scores ~10000, a noise
-  // window ~450.  1500 (≈3× above noise) keeps margin while staying sensitive to
-  // degraded real-world frames, and still rejects wrong-profile hits.
+  // score is amplitude-independent: a clean frame scores ~10000, a noise window
+  // ~450.  1500 (≈3× above noise) stays sensitive to degraded real-world frames
+  // while rejecting noise.
   const MIN_FRAME_SCORE = 1500
 
-  // Reference chirps are cached per sample rate (see getReferenceChirps).
-  const refs = getReferenceChirps(sampleRate)
+  // Single fixed timing profile — reference chirps cached per sample rate.
+  const refs = getReferenceChirps(sampleRate)[0]
+  const dN = Math.round(sampleRate * FRAME_PROFILES[0].durationMs / 1000)
+  if (samples.length < dN) return null
 
-  // Try each of the 4 timing profiles; keep the highest-scoring self-consistent candidate.
-  // (Shorter profiles can accidentally satisfy the XOR check with wrong symbols;
-  // the correct profile always has a much higher total dot-product score.)
-  let bestScore = -Infinity, bestSyms = null
+  // Normalize the frame window to unit RMS so detection is amplitude-independent.
+  const frameWin = new Float32Array(dN)
+  let sumSq = 0
+  for (let i = 0; i < dN; i++) sumSq += samples[i] * samples[i]
+  const rms = Math.sqrt(sumSq / dN)
+  if (rms < 1e-6) return null
+  const inv = 1 / rms
+  for (let i = 0; i < dN; i++) frameWin[i] = samples[i] * inv
 
-  for (let p = 0; p < FRAME_PROFILES.length; p++) {
-    const prof = FRAME_PROFILES[p]
-    const dN = Math.round(sampleRate * prof.durationMs / 1000)
-    if (samples.length < dN) continue  // window too short for this profile
-
-    // Normalize the frame window to unit RMS so detection is amplitude-independent.
-    const frameWin = new Float32Array(dN)
-    let sumSq = 0
-    for (let i = 0; i < dN; i++) sumSq += samples[i] * samples[i]
-    const rms = Math.sqrt(sumSq / dN)
-    if (rms < 1e-6) continue  // silent for this profile length
-    const inv = 1 / rms
-    for (let i = 0; i < dN; i++) frameWin[i] = samples[i] * inv
-
-    // For each band, find the symbol (0-15) whose reference chirp best matches
-    // the received frame — matched filter via dot product against cached chirps.
-    const syms = [], scores = []
-    for (let b = 0; b < 4; b++) {
-      const bandRefs = refs[p][b]
-      let bestDot = -Infinity, bestSym = 0
-
-      for (let s = 0; s < 16; s++) {
-        const ref = bandRefs[s]
-        // Strided correlation: all chirps are well below ~4 kHz, so sampling the
-        // dot product every CORR_STRIDE samples (≈12 kHz effective) loses no
-        // accuracy but cuts the detector's cost ~4×, keeping it real-time on
-        // slower devices.  Scale by the stride so scores stay comparable.
-        let dot = 0
-        for (let i = 0; i < dN; i += CORR_STRIDE) dot += frameWin[i] * ref[i]
-        dot *= CORR_STRIDE
-        if (dot > bestDot) { bestDot = dot; bestSym = s }
-      }
-
-      syms[b] = bestSym
-      scores[b] = bestDot
+  // For each band, find the symbol (0-15) whose reference chirp best matches the
+  // received frame — matched filter via strided dot product against cached chirps.
+  const syms = [], scores = []
+  for (let b = 0; b < BANDS.length; b++) {
+    const bandRefs = refs[b]
+    let bestDot = -Infinity, bestSym = 0
+    for (let s = 0; s < 16; s++) {
+      const ref = bandRefs[s]
+      let dot = 0
+      for (let i = 0; i < dN; i += CORR_STRIDE) dot += frameWin[i] * ref[i]
+      dot *= CORR_STRIDE
+      if (dot > bestDot) { bestDot = dot; bestSym = s }
     }
-
-    // Self-consistency check: profile derived from symbols must match the tried profile.
-    const computedProfile = (syms[0] ^ syms[1] ^ syms[2] ^ syms[3]) & 0x3
-    const score = scores[0] + scores[1] + scores[2] + scores[3]
-    if (diag && score > diag.score) {     // raw best across all profiles
-      diag.score = score
-      diag.bands = scores.slice()         // per-band match strength (is each band surviving?)
-    }
-    if (computedProfile === p) {
-      if (score > bestScore) { bestScore = score; bestSyms = syms.slice() }
-    }
+    syms[b] = bestSym
+    scores[b] = bestDot
   }
 
-  if (bestScore < MIN_FRAME_SCORE) return null
-  return bestSyms
+  const score = scores.reduce((a, c) => a + c, 0)
+  if (diag) { diag.score = score; diag.bands = scores.slice() }
+  if (score < MIN_FRAME_SCORE) return null
+  return syms
 }
 
 // ---------------------------------------------------------------------------
@@ -428,7 +399,7 @@ export function encode(bytes, sampleRate) {
 
   // Trailing silence: one max-length chirp's worth, so the decoder always has a
   // full detection window for the checksum frame even at end-of-stream.
-  segments.push(new Float32Array(Math.round(sampleRate * FRAME_PROFILES[3].durationMs / 1000)))
+  segments.push(new Float32Array(Math.round(sampleRate * FRAME_PROFILES[0].durationMs / 1000)))
 
   // Concatenate all segments
   const totalLen = segments.reduce((sum, s) => sum + s.length, 0)
@@ -465,7 +436,7 @@ export function createDecoder(sampleRate, onBytes, onEvent = null) {
   // Timing constants
   const PREAMBLE_SLOT_N = Math.round(sampleRate * (PREAMBLE_DURATION_MS + PREAMBLE_GAP_MS) / 1000)
   const POST_GAP_N      = Math.round(sampleRate * POST_PREAMBLE_GAP_MS / 1000)
-  const MAX_CHIRP_N     = Math.round(sampleRate * FRAME_PROFILES[3].durationMs / 1000)
+  const MAX_CHIRP_N     = Math.round(sampleRate * FRAME_PROFILES[0].durationMs / 1000)  // fixed chirp length
   const ANALYSIS_N      = Math.round(sampleRate * 30 / 1000)  // preamble scan step
   const MAX_PAYLOAD     = 142
 
@@ -551,10 +522,8 @@ export function createDecoder(sampleRate, onBytes, onEvent = null) {
   // buf.length; an overshoot would empty the buffer and cause the next push()
   // chunk to land at the wrong PCM position, corrupting all subsequent decodes.
   //
-  // Phase 2 — Detection: always wait for a full MAX_CHIRP_N window before
-  // detecting.  A truncated window lets a shorter profile be (mis)detected
-  // before the correct longer-profile chirp has fully arrived.  encode() appends
-  // trailing silence so even the final checksum frame reaches a full window.
+  // Phase 2 — Detection: wait for a full chirp window before detecting.  encode()
+  // appends trailing silence so even the final checksum frame reaches a full window.
   function tryFrame() {
     // — Phase 1: drain pending gap —
     if (skipRemaining > 0) {
@@ -585,11 +554,11 @@ export function createDecoder(sampleRate, onBytes, onEvent = null) {
     }
     frameMisses = 0
 
-    // Frame detected — consume the chirp portion and queue the gap for later.
-    const profileIdx = (syms[0] ^ syms[1] ^ syms[2] ^ syms[3]) & 0x3
-    const prof       = FRAME_PROFILES[profileIdx]
-    const chirpN     = Math.round(sampleRate * prof.durationMs / 1000)
-    const gapN       = Math.round(sampleRate * prof.gapMs    / 1000)
+    // Frame detected — consume the (fixed-length) chirp portion and queue the gap.
+    // Fixed timing means a misread frame can't change how far we advance, so the
+    // stream stays aligned regardless of symbol errors.
+    const chirpN = Math.round(sampleRate * FRAME_PROFILES[0].durationMs / 1000)
+    const gapN   = Math.round(sampleRate * FRAME_PROFILES[0].gapMs    / 1000)
     const b0 = (syms[0] << 4) | syms[1]
     const b1 = (syms[2] << 4) | syms[3]
 

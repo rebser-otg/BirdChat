@@ -15,15 +15,15 @@ import {
   createDecoder,
 } from '../lib/birdCodec.js'
 
-// Helper: slot length in samples for a given symbols array
-function slotSamples(syms, sr = SR) {
-  const p = FRAME_PROFILES[(syms[0] ^ syms[1] ^ syms[2] ^ syms[3]) & 0x3]
+// Helper: slot length in samples (fixed for all frames)
+function slotSamples(_syms, sr = SR) {
+  const p = FRAME_PROFILES[0]
   return Math.round(sr * (p.durationMs + p.gapMs) / 1000)
 }
 
-// Helper: chirp-only length (no gap) for a given symbols array
-function chirpSamples(syms, sr = SR) {
-  const p = FRAME_PROFILES[(syms[0] ^ syms[1] ^ syms[2] ^ syms[3]) & 0x3]
+// Helper: chirp-only length (no gap), fixed for all frames
+function chirpSamples(_syms, sr = SR) {
+  const p = FRAME_PROFILES[0]
   return Math.round(sr * p.durationMs / 1000)
 }
 
@@ -73,17 +73,19 @@ describe('synthesizeFrame', () => {
     expect(synthesizeFrame([0, 0, 0, 0], SR)).toBeInstanceOf(Float32Array)
   })
 
-  it('has the correct frame slot length based on timing profile', () => {
-    const syms  = [0, 0, 0, 0]     // profile = (0^0^0^0)&3 = 0 → FRAME_PROFILES[0]
-    const frame = synthesizeFrame(syms, SR)
-    expect(frame.length).toBe(slotSamples(syms))
+  it('has the fixed frame slot length', () => {
+    const frame = synthesizeFrame([0, 0, 0, 0], SR)
+    expect(frame.length).toBe(slotSamples())
   })
 
-  it('different symbol sets produce different frame lengths (profile variation)', () => {
-    // profile 0 vs profile 3 must differ in length
-    const syms0 = [0, 0, 0, 0]    // XOR = 0 → profile 0 (shortest)
-    const syms3 = [0, 0, 0, 3]    // XOR = 3 → profile 3 (longest)
-    expect(synthesizeFrame(syms0, SR).length).toBeLessThan(synthesizeFrame(syms3, SR).length)
+  it('all symbol sets produce the same frame length (fixed timing)', () => {
+    // Frame length no longer depends on data — every frame is identical length,
+    // so a misread frame cannot desync the rest of the stream.
+    const a = synthesizeFrame([0, 0, 0, 0], SR).length
+    const b = synthesizeFrame([0, 0, 0, 3], SR).length
+    const c = synthesizeFrame([15, 1, 7, 9], SR).length
+    expect(a).toBe(b)
+    expect(b).toBe(c)
   })
 
   it('amplitude stays within [-1, 1]', () => {
@@ -188,8 +190,8 @@ describe('encode', () => {
   })
 
   it('has the correct total sample count for a 2-byte payload', () => {
-    // Wire layout: preamble×2 + post-preamble gap + len frame + 1 data frame + checksum frame
-    // Each frame length is profile-dependent: (sym0^sym1^sym2^sym3)&3 picks the profile.
+    // Wire layout: preamble×2 + post-preamble gap + len frame + 1 data frame
+    //   + checksum frame + trailing silence.  All frames are a fixed length.
     const bytes       = new Uint8Array([0x48, 0x69])
     const checksum    = bytes[0] ^ bytes[1]
     const preambleLen = Math.round(SR * (PREAMBLE_DURATION_MS + PREAMBLE_GAP_MS) / 1000)
@@ -197,7 +199,7 @@ describe('encode', () => {
     const lenFrame    = slotSamples(bytePairToSymbols(bytes.length, 0))
     const dataFrame   = slotSamples(bytePairToSymbols(bytes[0], bytes[1]))
     const cksFrame    = slotSamples(bytePairToSymbols(checksum, bytes.length))
-    const trailing    = Math.round(SR * FRAME_PROFILES[3].durationMs / 1000)  // trailing silence
+    const trailing    = Math.round(SR * FRAME_PROFILES[0].durationMs / 1000)  // trailing silence
     const expected    = 2 * preambleLen + gapLen + lenFrame + dataFrame + cksFrame + trailing
     expect(encode(bytes, SR).length).toBe(expected)
   })
@@ -211,7 +213,7 @@ describe('encode', () => {
     const dataFrame1  = slotSamples(bytePairToSymbols(bytes[0], bytes[1]))
     const dataFrame2  = slotSamples(bytePairToSymbols(bytes[2], 0))  // zero-padded
     const cksFrame    = slotSamples(bytePairToSymbols(checksum, bytes.length))
-    const trailing    = Math.round(SR * FRAME_PROFILES[3].durationMs / 1000)  // trailing silence
+    const trailing    = Math.round(SR * FRAME_PROFILES[0].durationMs / 1000)  // trailing silence
     const expected    = 2 * preambleLen + gapLen + lenFrame + dataFrame1 + dataFrame2 + cksFrame + trailing
     expect(encode(bytes, SR).length).toBe(expected)
   })
@@ -249,7 +251,7 @@ describe('detectFrame', () => {
     const syms  = [4, 8, 6, 9]
     const frame = synthesizeFrame(syms, SR)
     // Pass enough samples for the longest profile
-    const maxChirpN = Math.round(SR * FRAME_PROFILES[3].durationMs / 1000)
+    const maxChirpN = Math.round(SR * FRAME_PROFILES[0].durationMs / 1000)
     const window    = frame.length >= maxChirpN
       ? frame.slice(0, maxChirpN)
       : (() => { const w = new Float32Array(maxChirpN); w.set(frame); return w })()
@@ -261,7 +263,7 @@ describe('detectFrame', () => {
   it('correctly decodes [0, 0, 0, 0]', () => {
     const syms   = [0, 0, 0, 0]
     const frame  = synthesizeFrame(syms, SR)
-    const maxN   = Math.round(SR * FRAME_PROFILES[3].durationMs / 1000)
+    const maxN   = Math.round(SR * FRAME_PROFILES[0].durationMs / 1000)
     const window = frame.length >= maxN ? frame.slice(0, maxN) : (() => { const w = new Float32Array(maxN); w.set(frame); return w })()
     expect(detectFrame(window, SR)).toEqual(syms)
   })
@@ -269,7 +271,7 @@ describe('detectFrame', () => {
   it('correctly decodes [15, 15, 15, 15]', () => {
     const syms   = [15, 15, 15, 15]
     const frame  = synthesizeFrame(syms, SR)
-    const maxN   = Math.round(SR * FRAME_PROFILES[3].durationMs / 1000)
+    const maxN   = Math.round(SR * FRAME_PROFILES[0].durationMs / 1000)
     const window = frame.length >= maxN ? frame.slice(0, maxN) : (() => { const w = new Float32Array(maxN); w.set(frame); return w })()
     expect(detectFrame(window, SR)).toEqual(syms)
   })
@@ -308,10 +310,8 @@ describe('createDecoder', () => {
     // Locate the checksum chirp and silence it entirely.
     // (The PCM tail is [checksum chirp][checksum gap][trailing silence].
     //  Zeroing only silent regions would not corrupt anything.)
-    const checksum  = input[0] ^ input[1]
-    const cksSyms   = bytePairToSymbols(checksum, input.length)
-    const cksProf   = FRAME_PROFILES[(cksSyms[0] ^ cksSyms[1] ^ cksSyms[2] ^ cksSyms[3]) & 0x3]
-    const trailing  = Math.round(SR * FRAME_PROFILES[3].durationMs / 1000)
+    const cksProf   = FRAME_PROFILES[0]  // fixed frame timing
+    const trailing  = Math.round(SR * FRAME_PROFILES[0].durationMs / 1000)
     const cksGapN   = Math.round(SR * cksProf.gapMs   / 1000)
     const cksChirpN = Math.round(SR * cksProf.durationMs / 1000)
     const chirpStart = pcm.length - trailing - cksGapN - cksChirpN
