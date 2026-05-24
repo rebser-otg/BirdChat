@@ -41,7 +41,7 @@
     if (!engineReady) {
       audioCtx = new AudioContext({ sampleRate: 48000 })
       try {
-        await init()
+        await init(audioCtx.sampleRate)  // use the actual rate — iOS may give 44100 not 48000
       } catch (err) {
         initError = '⚠️ Failed to load audio engine. Please reload the page.'
         audioCtx.close()
