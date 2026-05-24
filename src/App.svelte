@@ -23,6 +23,7 @@
   let listening = $state(false)   // mic actively capturing
   let capturePct = $state(100)    // % of audio samples actually delivered (drop detector)
   let droppedMs = $state(0)       // cumulative dropped audio (ms)
+  let diagOpen = $state(false)    // diagnostics panel expanded? (collapsed so bubbles show)
 
   function handleDiag(d) {
     if (d.kind === 'level') {
@@ -179,8 +180,13 @@
     <button class="listen-btn" onclick={startListen}>🎧 Tap to listen for tweets</button>
   {/if}
 
-  <!-- Live diagnostics: confirms the mic is hearing the chirps and shows decode events -->
+  <!-- Live diagnostics: collapsed by default so chat bubbles stay visible -->
   {#if listening}
+    <button class="diag-toggle" onclick={() => diagOpen = !diagOpen}>
+      🔧 Diagnostics {diagOpen ? '▾' : '▸'}
+    </button>
+  {/if}
+  {#if listening && diagOpen}
     <div class="diag">
       <div class="diag-level">
         <span class="diag-label">🎙 mic</span>
@@ -293,6 +299,17 @@
   .diag-hint { margin-top: 6px; opacity: 0.6; }
   .diag-capture { margin-top: 4px; opacity: 0.85; }
   .diag-capture.warn { color: #ff9166; font-weight: 600; opacity: 1; }
+  .diag-toggle {
+    margin: 4px 16px 0;
+    padding: 4px 10px;
+    align-self: flex-start;
+    border: none;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.25);
+    color: #cde3cd;
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
   .version {
     text-align: center;
     font-size: 0.7rem;
