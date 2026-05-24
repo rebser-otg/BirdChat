@@ -23,9 +23,6 @@ export default defineConfig({
       }
     })
   ],
-  optimizeDeps: {
-    exclude: ['ggwave']
-  },
   test: {
     environment: 'jsdom',
     globals: true

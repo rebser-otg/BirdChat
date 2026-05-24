@@ -11,6 +11,8 @@ import {
   bytePairToSymbols,
   encode,
   goertzel,
+  detectFrame,
+  createDecoder,
 } from '../lib/birdCodec.js'
 
 // Helper: slot length in samples for a given symbols array
@@ -228,5 +230,141 @@ describe('encode', () => {
     const a = encode(new Uint8Array([0x42]), SR)
     const b = encode(new Uint8Array([0x42]), SR)
     expect(Array.from(a)).toEqual(Array.from(b))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// detectFrame
+// ---------------------------------------------------------------------------
+
+describe('detectFrame', () => {
+  it('returns null for silence', () => {
+    const silence = new Float32Array(Math.round(SR * 0.2))  // 200 ms silence
+    expect(detectFrame(silence, SR)).toBeNull()
+  })
+
+  it('decodes a synthesized frame correctly', () => {
+    const syms  = [4, 8, 6, 9]
+    const frame = synthesizeFrame(syms, SR)
+    // Pass enough samples for the longest profile
+    const maxChirpN = Math.round(SR * FRAME_PROFILES[3].durationMs / 1000)
+    const window    = frame.length >= maxChirpN
+      ? frame.slice(0, maxChirpN)
+      : (() => { const w = new Float32Array(maxChirpN); w.set(frame); return w })()
+    const decoded = detectFrame(window, SR)
+    expect(decoded).not.toBeNull()
+    expect(decoded).toEqual(syms)
+  })
+
+  it('correctly decodes [0, 0, 0, 0]', () => {
+    const syms   = [0, 0, 0, 0]
+    const frame  = synthesizeFrame(syms, SR)
+    const maxN   = Math.round(SR * FRAME_PROFILES[3].durationMs / 1000)
+    const window = frame.length >= maxN ? frame.slice(0, maxN) : (() => { const w = new Float32Array(maxN); w.set(frame); return w })()
+    expect(detectFrame(window, SR)).toEqual(syms)
+  })
+
+  it('correctly decodes [15, 15, 15, 15]', () => {
+    const syms   = [15, 15, 15, 15]
+    const frame  = synthesizeFrame(syms, SR)
+    const maxN   = Math.round(SR * FRAME_PROFILES[3].durationMs / 1000)
+    const window = frame.length >= maxN ? frame.slice(0, maxN) : (() => { const w = new Float32Array(maxN); w.set(frame); return w })()
+    expect(detectFrame(window, SR)).toEqual(syms)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// createDecoder
+// ---------------------------------------------------------------------------
+
+describe('createDecoder', () => {
+  it('decodes a full encode() output into the original bytes', () => {
+    const input = new Uint8Array([0x48, 0x69])
+    const pcm   = encode(input, SR)
+    let received = null
+    const dec   = createDecoder(SR, (bytes) => { received = bytes })
+    dec.push(pcm)
+    expect(received).not.toBeNull()
+    expect(Array.from(received)).toEqual(Array.from(input))
+  })
+
+  it('decodes correctly when PCM is pushed in 1024-sample chunks', () => {
+    const input = new Uint8Array([0x48, 0x69])
+    const pcm   = encode(input, SR)
+    let received = null
+    const dec   = createDecoder(SR, (bytes) => { received = bytes })
+    for (let i = 0; i < pcm.length; i += 1024) {
+      dec.push(pcm.slice(i, Math.min(i + 1024, pcm.length)))
+    }
+    expect(received).not.toBeNull()
+    expect(Array.from(received)).toEqual(Array.from(input))
+  })
+
+  it('does not call onBytes when checksum is corrupted', () => {
+    const input = new Uint8Array([0x48, 0x69])
+    const pcm   = encode(input, SR)
+    // Locate the checksum chirp and silence it entirely.
+    // (The last section of the PCM is [checksum chirp][checksum gap].
+    //  Zeroing only the gap — which is already silent — would not corrupt anything.)
+    const checksum  = input[0] ^ input[1]
+    const cksSyms   = bytePairToSymbols(checksum, input.length)
+    const cksProf   = FRAME_PROFILES[(cksSyms[0] ^ cksSyms[1] ^ cksSyms[2] ^ cksSyms[3]) & 0x3]
+    const cksGapN   = Math.round(SR * cksProf.gapMs   / 1000)
+    const cksChirpN = Math.round(SR * cksProf.durationMs / 1000)
+    const chirpStart = pcm.length - cksGapN - cksChirpN
+    for (let i = chirpStart; i < chirpStart + cksChirpN; i++) pcm[i] = 0
+    let called = false
+    const dec  = createDecoder(SR, () => { called = true })
+    dec.push(pcm)
+    expect(called).toBe(false)
+  })
+
+  it('does not call onBytes for 5 seconds of white noise', () => {
+    const noise = new Float32Array(SR * 5)
+    for (let i = 0; i < noise.length; i++) noise[i] = Math.random() * 2 - 1
+    let called = false
+    const dec  = createDecoder(SR, () => { called = true })
+    expect(() => dec.push(noise)).not.toThrow()
+    expect(called).toBe(false)
+  })
+
+  it('returns to IDLE after reset() and decodes correctly on next push', () => {
+    const input = new Uint8Array([0x41])
+    const pcm   = encode(input, SR)
+    let received = null
+    const dec   = createDecoder(SR, (bytes) => { received = bytes })
+    // Push partial PCM then reset
+    dec.push(pcm.slice(0, Math.floor(pcm.length / 2)))
+    dec.reset()
+    received = null
+    // Full push after reset should decode cleanly
+    dec.push(pcm)
+    expect(received).not.toBeNull()
+    expect(Array.from(received)).toEqual(Array.from(input))
+  })
+
+  it('decodes a 3-byte payload (odd-length, zero-padded last frame)', () => {
+    const input = new Uint8Array([0x41, 0x42, 0x43])
+    const pcm   = encode(input, SR)
+    let received = null
+    const dec   = createDecoder(SR, (bytes) => { received = bytes })
+    dec.push(pcm)
+    expect(received).not.toBeNull()
+    expect(Array.from(received)).toEqual(Array.from(input))
+  })
+
+  it('decodes audio attenuated 20× (real recordings are much quieter than synthesized PCM)', () => {
+    const input = new Uint8Array([0x48, 0x69])
+    const pcm   = encode(input, SR)
+    // Scale down to 5% amplitude — quieter than the ~9× attenuation seen in a
+    // real laptop-speaker → phone-mic recording.  Detection is RMS-normalized,
+    // so it must still decode.
+    const quiet = new Float32Array(pcm.length)
+    for (let i = 0; i < pcm.length; i++) quiet[i] = pcm[i] * 0.05
+    let received = null
+    const dec = createDecoder(SR, (bytes) => { received = bytes })
+    dec.push(quiet)
+    expect(received).not.toBeNull()
+    expect(Array.from(received)).toEqual(Array.from(input))
   })
 })

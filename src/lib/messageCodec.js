@@ -1,13 +1,15 @@
 export const MAX_NAME_LENGTH = 16
 export const MAX_TEXT_LENGTH = 100
-const MAX_PAYLOAD_BYTES = 140
+// birdCodec wire format supports up to 142 bytes of payload.
+// Keep headroom to 142 so multi-byte UTF-8 input (emoji, CJK) stays within codec capacity.
+const MAX_PAYLOAD_BYTES = 142
 
 /**
- * Pack a {name, text} message into a compact JSON string for ggwave encoding.
+ * Pack a {name, text} message into a compact JSON string for acoustic encoding.
  * Truncates name to MAX_NAME_LENGTH chars, text to MAX_TEXT_LENGTH chars,
  * then further truncates text if the UTF-8 byte length exceeds MAX_PAYLOAD_BYTES.
  * @param {{ name: string, text: string }} msg
- * @returns {string} JSON string, always ≤ 140 bytes UTF-8
+ * @returns {string} JSON string, always ≤ 142 bytes UTF-8
  */
 export function pack({ name, text }) {
   const n = String(name).slice(0, MAX_NAME_LENGTH)
@@ -23,7 +25,7 @@ export function pack({ name, text }) {
 }
 
 /**
- * Unpack a JSON string decoded from ggwave back into {name, text}.
+ * Unpack a JSON string decoded from birdCodec back into {name, text}.
  * Returns null if the string is malformed or missing required fields.
  * @param {string} str
  * @returns {{ name: string, text: string } | null}

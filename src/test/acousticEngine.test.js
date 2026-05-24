@@ -1,19 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-// --- ggwave mock (must be before the import of the module under test) ---
-const mockInstance = 1
-const mockProtocolId = { GGWAVE_PROTOCOL_AUDIBLE_FAST: 2 }
-const mockGgwave = {
-  getDefaultParameters: vi.fn(() => ({ sampleRateInp: 0, sampleRateOut: 0 })),
-  init: vi.fn(() => mockInstance),
-  // Real ggwave.encode() returns raw int16 PCM as a byte array (Int8Array from Emscripten).
-  // Simulate 3 samples: Int16Array → view as Int8Array bytes.
-  encode: vi.fn(() => new Int8Array(new Int16Array([10000, -10000, 5000]).buffer)),
-  decode: vi.fn(() => null),
-  ProtocolId: mockProtocolId,
-}
-vi.mock('ggwave', () => ({ default: vi.fn(async () => mockGgwave) }))
-
 // --- Web API mocks ---
 const mockPort = { onmessage: null, postMessage: vi.fn() }
 const mockWorkletNode = { port: mockPort, disconnect: vi.fn() }
@@ -27,7 +13,7 @@ const mockAudioContext = {
 }
 global.AudioWorkletNode = vi.fn(function () { return mockWorkletNode })
 global.navigator = {
-  mediaDevices: { getUserMedia: vi.fn(async () => mockStream) }
+  mediaDevices: { getUserMedia: vi.fn(async () => mockStream) },
 }
 
 import { init, encode, startListening, stopListening } from '../lib/acousticEngine.js'
@@ -37,102 +23,107 @@ beforeEach(() => {
 })
 
 describe('init', () => {
-  it('initializes ggwave with 48000 sample rate', async () => {
-    await init()
-    expect(mockGgwave.getDefaultParameters).toHaveBeenCalled()
-    expect(mockGgwave.init).toHaveBeenCalledWith(
-      expect.objectContaining({ sampleRateInp: 48000, sampleRateOut: 48000 })
-    )
+  it('initializes synchronously without errors', () => {
+    expect(() => init()).not.toThrow()
+  })
+
+  it('can be awaited (returns undefined)', async () => {
+    await expect(Promise.resolve(init())).resolves.toBeUndefined()
   })
 })
 
 describe('encode', () => {
-  it('returns a Float32Array', async () => {
-    await init()
-    const result = encode('{"n":"Robin","t":"hi"}')
-    expect(result).toBeInstanceOf(Float32Array)
+  it('returns a Float32Array', () => {
+    init()
+    expect(encode('{"n":"Robin","t":"hi"}')).toBeInstanceOf(Float32Array)
   })
 
-  it('returns a non-trivial Float32Array (birdCodec produces real audio)', async () => {
-    await init()
+  it('returns a non-trivial Float32Array (birdCodec produces real audio)', () => {
+    init()
     // birdCodec generates preamble + frames — even a short message is thousands of samples
-    const result = encode('hi')
-    expect(result.length).toBeGreaterThan(10000)
-  })
-
-  it('does not call ggwave.encode (encode path uses birdCodec now)', async () => {
-    await init()
-    encode('test')
-    expect(mockGgwave.encode).not.toHaveBeenCalled()
+    expect(encode('hi').length).toBeGreaterThan(10000)
   })
 })
 
 describe('startListening', () => {
   it('loads the mic worklet module', async () => {
-    await init()
+    init()
     await startListening(mockAudioContext, vi.fn())
     expect(mockAudioContext.audioWorklet.addModule).toHaveBeenCalledWith('/mic-worklet.js')
   })
 
-  it('requests microphone access', async () => {
-    await init()
+  it('requests microphone access with audio DSP disabled', async () => {
+    init()
     await startListening(mockAudioContext, vi.fn())
-    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledWith({ audio: true, video: false })
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledWith({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+      video: false,
+    })
   })
 
-  it('calls onMessage when ggwave decodes a valid packet', async () => {
-    await init()
-    const encoded = new TextEncoder().encode('{"n":"Robin","t":"hello"}')
-    mockGgwave.decode.mockReturnValueOnce(encoded)
+  it('calls onMessage when PCM chunks decode to a valid message', async () => {
+    // Generate encoded PCM (sets _muteUntil), then reinit to clear the mute window
+    // so the worklet handler actually forwards the chunks to the decoder.
+    init()
+    const payload = '{"n":"Robin","t":"hello"}'
+    const pcm = encode(payload)
+    init()  // reset _muteUntil = 0
 
     const onMessage = vi.fn()
     await startListening(mockAudioContext, onMessage)
 
-    // Simulate AudioWorklet posting a PCM chunk
-    const chunk = new Float32Array(1024)
-    mockWorkletNode.port.onmessage({ data: { type: 'pcm', chunk } })
+    // Simulate the AudioWorklet posting PCM chunks
+    for (let i = 0; i < pcm.length; i += 1024) {
+      const chunk = pcm.slice(i, Math.min(i + 1024, pcm.length))
+      mockWorkletNode.port.onmessage({ data: { type: 'pcm', chunk } })
+    }
 
     expect(onMessage).toHaveBeenCalledWith({ name: 'Robin', text: 'hello' })
   })
 
-  it('silently drops garbage decode results', async () => {
-    await init()
-    mockGgwave.decode.mockReturnValueOnce(new TextEncoder().encode('not json at all!!!'))
-
+  it('silently drops garbage PCM without crashing or calling onMessage', async () => {
+    init()
     const onMessage = vi.fn()
     await startListening(mockAudioContext, onMessage)
 
-    const chunk = new Float32Array(1024)
-    mockWorkletNode.port.onmessage({ data: { type: 'pcm', chunk } })
+    const noise = new Float32Array(48000)  // 1 second of white noise
+    for (let i = 0; i < noise.length; i++) noise[i] = Math.random() * 2 - 1
+    for (let i = 0; i < noise.length; i += 1024) {
+      const chunk = noise.slice(i, Math.min(i + 1024, noise.length))
+      expect(() => mockWorkletNode.port.onmessage({ data: { type: 'pcm', chunk } })).not.toThrow()
+    }
 
     expect(onMessage).not.toHaveBeenCalled()
   })
 
   it('suppresses decoding during the loopback window after encode', async () => {
-    await init()
-    // encode() sets _muteUntil; the decode handler should be suppressed while within the window
-    encode('{"n":"Test","t":"hi"}')  // sets _muteUntil = now + ~1001ms
-    const encoded = new TextEncoder().encode('{"n":"Robin","t":"hello"}')
-    mockGgwave.decode.mockReturnValueOnce(encoded)
+    init()
+    encode('{"n":"Test","t":"hi"}')  // sets _muteUntil ≈ now + ~1s + 500ms
 
     const onMessage = vi.fn()
     await startListening(mockAudioContext, onMessage)
+
+    // Even if the decoded audio would be valid, it should be suppressed
     const chunk = new Float32Array(1024)
     mockWorkletNode.port.onmessage({ data: { type: 'pcm', chunk } })
-    expect(onMessage).not.toHaveBeenCalled()  // suppressed within mute window
+    expect(onMessage).not.toHaveBeenCalled()
   })
 })
 
 describe('stopListening', () => {
   it('disconnects the worklet node', async () => {
-    await init()
+    init()
     await startListening(mockAudioContext, vi.fn())
     stopListening()
     expect(mockWorkletNode.disconnect).toHaveBeenCalled()
   })
 
   it('stops all mic tracks', async () => {
-    await init()
+    init()
     await startListening(mockAudioContext, vi.fn())
     stopListening()
     expect(mockTrack.stop).toHaveBeenCalled()
