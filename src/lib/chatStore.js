@@ -1,6 +1,7 @@
 import { writable } from 'svelte/store'
 
 function createChatStore() {
+  let _msgId = 0
   const { subscribe, update, set } = writable([])
 
   return {
@@ -10,7 +11,7 @@ function createChatStore() {
      * @param {{ name: string, text: string, mine: boolean }} message
      */
     push(message) {
-      update(msgs => [...msgs, { ...message, ts: Date.now() }])
+      update(msgs => [...msgs, { ...message, ts: Date.now(), id: ++_msgId }])
     },
     /** Remove all messages. */
     clear() {

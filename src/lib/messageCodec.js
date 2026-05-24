@@ -15,8 +15,8 @@ export function pack({ name, text }) {
   let packed = JSON.stringify({ n, t })
   // Safety: enforce byte limit for multi-byte UTF-8 (emoji, CJK, etc.)
   const encoder = new TextEncoder()
-  while (encoder.encode(packed).length > MAX_PAYLOAD_BYTES && t.length > 0) {
-    t = t.slice(0, -1)
+  while (encoder.encode(packed).length > MAX_PAYLOAD_BYTES && [...t].length > 0) {
+    t = [...t].slice(0, -1).join('')
     packed = JSON.stringify({ n, t })
   }
   return packed

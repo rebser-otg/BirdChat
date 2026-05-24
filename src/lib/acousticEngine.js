@@ -8,6 +8,7 @@ let ggwave = null
 let instance = null
 let workletNode = null
 let micStream = null
+let _muteUntil = 0
 
 /**
  * Initialize ggwave WASM. Must be called once before encode/startListening.
@@ -18,6 +19,7 @@ export async function init() {
   params.sampleRateInp = SAMPLE_RATE
   params.sampleRateOut = SAMPLE_RATE
   instance = ggwave.init(params)
+  _muteUntil = 0
 }
 
 /**
@@ -27,7 +29,10 @@ export async function init() {
  */
 export function encode(text) {
   if (!ggwave || instance === null) throw new Error('acousticEngine not initialized')
-  return ggwave.encode(instance, text, ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FAST, VOLUME)
+  const pcm = ggwave.encode(instance, text, ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FAST, VOLUME)
+  // Suppress acoustic loopback: mute decode during transmission + 1s buffer for room reverb
+  _muteUntil = Date.now() + (pcm.length / SAMPLE_RATE) * 1000 + 1000
+  return pcm
 }
 
 /**
@@ -47,6 +52,7 @@ export async function startListening(audioContext, onMessage) {
   workletNode = new AudioWorkletNode(audioContext, 'mic-processor')
   workletNode.port.onmessage = (event) => {
     if (event.data.type !== 'pcm') return
+    if (Date.now() < _muteUntil) return  // suppress acoustic loopback during transmission
     const result = ggwave.decode(instance, event.data.chunk)
     if (!result || result.length === 0) return
     try {

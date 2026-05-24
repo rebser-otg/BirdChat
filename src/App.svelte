@@ -17,6 +17,7 @@
   // Shared AudioContext — created on first user gesture (browser autoplay policy)
   let audioCtx = null
   let engineReady = false
+  let micListening = false
 
   // Persist name to localStorage
   $effect(() => {
@@ -37,26 +38,31 @@
   const messages = $derived($chatStore)
 
   async function ensureAudio() {
-    if (engineReady) return
-    audioCtx = new AudioContext({ sampleRate: 48000 })
-    try {
-      await init()
-    } catch (err) {
-      initError = '⚠️ Failed to load audio engine. Please reload the page.'
-      audioCtx.close()
-      audioCtx = null
-      return
+    if (!engineReady) {
+      audioCtx = new AudioContext({ sampleRate: 48000 })
+      try {
+        await init()
+      } catch (err) {
+        initError = '⚠️ Failed to load audio engine. Please reload the page.'
+        audioCtx.close()
+        audioCtx = null
+        return
+      }
+      engineReady = true
     }
-    engineReady = true
-    try {
-      await startListening(audioCtx, (msg) => {
-        chatStore.push({ ...msg, mine: false })
-      })
-    } catch (err) {
-      if (err.name === 'NotAllowedError') {
-        micError = "🎙 Microphone access denied — others can't send to you, but you can still tweet."
-      } else {
-        micError = `🎙 Microphone error: ${err.message}`
+
+    if (!micListening) {
+      try {
+        await startListening(audioCtx, (msg) => {
+          chatStore.push({ ...msg, mine: false })
+        })
+        micListening = true
+      } catch (err) {
+        if (err.name === 'NotAllowedError') {
+          micError = "🎙 Microphone access denied — others can't send to you, but you can still tweet."
+        } else {
+          micError = `🎙 Microphone error: ${err.message}`
+        }
       }
     }
   }
@@ -71,6 +77,7 @@
       const text = inputText.trim()
       const packed = pack({ name, text })
       const pcm = encode(packed)
+      if (audioCtx.state === 'suspended') await audioCtx.resume()
       play(pcm, audioCtx)
       chatStore.push({ name, text, mine: true })
       inputText = ''
@@ -123,7 +130,7 @@
 
   <!-- Chat bubbles -->
   <main class="chat" bind:this={chatEl}>
-    {#each messages as msg (msg.ts)}
+    {#each messages as msg (msg.id)}
       <div class="bubble-row {msg.mine ? 'mine' : 'theirs'}">
         <div class="bubble">
           {#if !msg.mine}

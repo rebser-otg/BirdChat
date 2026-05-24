@@ -11,7 +11,7 @@ describe('chatStore', () => {
     expect(get(chatStore)).toEqual([])
   })
 
-  it('push adds a message with ts and mine fields', () => {
+  it('push adds a message with ts, mine, and id fields', () => {
     chatStore.push({ name: 'Robin', text: 'hello', mine: true })
     const msgs = get(chatStore)
     expect(msgs).toHaveLength(1)
@@ -19,6 +19,14 @@ describe('chatStore', () => {
     expect(msgs[0].text).toBe('hello')
     expect(msgs[0].mine).toBe(true)
     expect(typeof msgs[0].ts).toBe('number')
+    expect(typeof msgs[0].id).toBe('number')
+  })
+
+  it('assigns unique ids to each message', () => {
+    chatStore.push({ name: 'Robin', text: 'a', mine: true })
+    chatStore.push({ name: 'Wren', text: 'b', mine: false })
+    const msgs = get(chatStore)
+    expect(msgs[0].id).not.toBe(msgs[1].id)
   })
 
   it('push appends in order', () => {

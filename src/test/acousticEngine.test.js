@@ -103,6 +103,20 @@ describe('startListening', () => {
 
     expect(onMessage).not.toHaveBeenCalled()
   })
+
+  it('suppresses decoding during the loopback window after encode', async () => {
+    await init()
+    // encode() sets _muteUntil; the decode handler should be suppressed while within the window
+    encode('{"n":"Test","t":"hi"}')  // sets _muteUntil = now + ~1001ms
+    const encoded = new TextEncoder().encode('{"n":"Robin","t":"hello"}')
+    mockGgwave.decode.mockReturnValueOnce(encoded)
+
+    const onMessage = vi.fn()
+    await startListening(mockAudioContext, onMessage)
+    const chunk = new Float32Array(1024)
+    mockWorkletNode.port.onmessage({ data: { type: 'pcm', chunk } })
+    expect(onMessage).not.toHaveBeenCalled()  // suppressed within mute window
+  })
 })
 
 describe('stopListening', () => {
