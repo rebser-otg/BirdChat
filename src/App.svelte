@@ -21,11 +21,15 @@
   let micLevel = $state(0)        // smoothed mic input RMS
   let diagEvents = $state([])     // recent decoder events (newest first)
   let listening = $state(false)   // mic actively capturing
+  let capturePct = $state(100)    // % of audio samples actually delivered (drop detector)
+  let droppedMs = $state(0)       // cumulative dropped audio (ms)
 
   function handleDiag(d) {
     if (d.kind === 'level') {
       // Peak meter with decay so the bar is readable
       micLevel = Math.max(d.rms, micLevel * 0.85)
+      if (d.captureRatio !== undefined) capturePct = Math.round(d.captureRatio * 100)
+      if (d.droppedMs !== undefined) droppedMs = d.droppedMs
     } else if (d.kind === 'event') {
       let label
       if (d.name === 'frame-score') {
@@ -185,6 +189,9 @@
         </div>
         <span class="diag-val">{micLevel.toFixed(3)}</span>
       </div>
+      <div class="diag-capture" class:warn={capturePct < 95}>
+        🎧 audio captured: {capturePct}%{droppedMs > 30 ? `  (dropped ${droppedMs} ms)` : ''}
+      </div>
       {#if diagEvents.length}
         <div class="diag-events">
           {#each diagEvents as ev}<div class="diag-event">{ev}</div>{/each}
@@ -284,6 +291,8 @@
   }
   .diag-event { padding: 1px 0; }
   .diag-hint { margin-top: 6px; opacity: 0.6; }
+  .diag-capture { margin-top: 4px; opacity: 0.85; }
+  .diag-capture.warn { color: #ff9166; font-weight: 600; opacity: 1; }
   .version {
     text-align: center;
     font-size: 0.7rem;

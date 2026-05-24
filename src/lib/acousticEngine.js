@@ -9,6 +9,12 @@ let _muteUntil = 0
 let _sampleRate = DEFAULT_SAMPLE_RATE
 let _decoder = null
 
+// Capture-health tracking: compare samples actually delivered by the AudioWorklet
+// against elapsed wall-clock time.  A ratio < 1 means the audio pipeline is
+// dropping samples (audio-thread glitches / overload), which desyncs the decoder.
+let _captureStart = 0
+let _samplesReceived = 0
+
 /**
  * Initialize the acoustic engine.  Synchronous — no WASM loading required.
  * Call once before encode/startListening, passing the AudioContext sample rate.
@@ -56,6 +62,9 @@ export async function startListening(audioContext, onMessage, onDiag = null) {
     onDiag ? (evt) => onDiag({ kind: 'event', ...evt }) : null,
   )
 
+  _captureStart = 0
+  _samplesReceived = 0
+
   await audioContext.audioWorklet.addModule(import.meta.env.BASE_URL + 'mic-worklet.js')
 
   // Disable the browser's voice-call DSP — echo cancellation, noise suppression
@@ -80,7 +89,17 @@ export async function startListening(audioContext, onMessage, onDiag = null) {
     if (onDiag) {
       let s = 0
       for (let i = 0; i < chunk.length; i++) s += chunk[i] * chunk[i]
-      onDiag({ kind: 'level', rms: Math.sqrt(s / chunk.length) })
+      // Capture health: samples delivered vs wall-clock elapsed. The AudioWorklet
+      // runs on the audio clock, so a sustained ratio < 1 means samples are being
+      // dropped (glitches/overload) — which would corrupt frame timing.
+      const now = (typeof performance !== 'undefined' ? performance.now() : Date.now())
+      if (_captureStart === 0) _captureStart = now
+      _samplesReceived += chunk.length
+      const elapsedSec = (now - _captureStart) / 1000
+      const expected   = elapsedSec * audioContext.sampleRate
+      const captureRatio = expected > audioContext.sampleRate * 0.3 ? _samplesReceived / expected : 1
+      const droppedMs    = Math.max(0, Math.round((expected - _samplesReceived) / audioContext.sampleRate * 1000))
+      onDiag({ kind: 'level', rms: Math.sqrt(s / chunk.length), captureRatio, droppedMs })
     }
     if (Date.now() < _muteUntil) return  // suppress acoustic loopback during transmission
     _decoder.push(chunk)
