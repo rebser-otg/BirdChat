@@ -81,6 +81,29 @@ export const PREAMBLE_GAP_MS      = 100   // silence between preamble chirps
 export const POST_PREAMBLE_GAP_MS = 100   // silence before first data frame
 
 // ---------------------------------------------------------------------------
+// Frequency analysis
+// ---------------------------------------------------------------------------
+
+/**
+ * Goertzel algorithm — compute power at a single target frequency.
+ *
+ * @param {Float32Array} samples
+ * @param {number} targetFreq  Hz
+ * @param {number} sampleRate
+ * @returns {number}  Power (unnormalized energy)
+ */
+export function goertzel(samples, targetFreq, sampleRate) {
+  const k = Math.round(samples.length * targetFreq / sampleRate)
+  const coeff = 2 * Math.cos(2 * Math.PI * k / samples.length)
+  let s1 = 0, s2 = 0
+  for (const x of samples) {
+    const s0 = x + coeff * s1 - s2
+    s2 = s1; s1 = s0
+  }
+  return s1 * s1 + s2 * s2 - coeff * s1 * s2
+}
+
+// ---------------------------------------------------------------------------
 // Synthesis helpers
 // ---------------------------------------------------------------------------
 

@@ -10,6 +10,7 @@ import {
   synthesizeFrame,
   bytePairToSymbols,
   encode,
+  goertzel,
 } from '../lib/birdCodec.js'
 
 // Helper: slot length in samples for a given symbols array
@@ -27,18 +28,39 @@ function chirpSamples(syms, sr = SR) {
 const SR = 48000
 
 // ---------------------------------------------------------------------------
-// Goertzel helper — copied inline so tests have no external dep on the decoder
+// goertzel
 // ---------------------------------------------------------------------------
-function goertzel(samples, targetFreq, sampleRate) {
-  const k = Math.round(samples.length * targetFreq / sampleRate)
-  const coeff = 2 * Math.cos(2 * Math.PI * k / samples.length)
-  let s1 = 0, s2 = 0
-  for (const x of samples) {
-    const s0 = x + coeff * s1 - s2
-    s2 = s1; s1 = s0
-  }
-  return s1 * s1 + s2 * s2 - coeff * s1 * s2
-}
+
+describe('goertzel', () => {
+  it('returns a number', () => {
+    const samples = new Float32Array(1440).fill(0)
+    expect(typeof goertzel(samples, 1000, SR)).toBe('number')
+  })
+
+  it('returns high energy when signal matches target frequency', () => {
+    const N = Math.round(SR * 30 / 1000)
+    const samples = new Float32Array(N)
+    const freq = 1000
+    for (let i = 0; i < N; i++) samples[i] = Math.sin(2 * Math.PI * freq * i / SR)
+    const energy = goertzel(samples, freq, SR)
+    expect(energy).toBeGreaterThan(1000)
+  })
+
+  it('returns low energy for silence', () => {
+    const samples = new Float32Array(1440).fill(0)
+    expect(goertzel(samples, 1000, SR)).toBe(0)
+  })
+
+  it('correctly separates two close frequencies', () => {
+    const N = Math.round(SR * 30 / 1000)
+    const samples = new Float32Array(N)
+    const targetFreq = 1000
+    for (let i = 0; i < N; i++) samples[i] = Math.sin(2 * Math.PI * targetFreq * i / SR)
+    const atTarget  = goertzel(samples, targetFreq, SR)
+    const atWrong   = goertzel(samples, 1300, SR)
+    expect(atTarget).toBeGreaterThan(atWrong * 5)
+  })
+})
 
 // ---------------------------------------------------------------------------
 // synthesizeFrame
