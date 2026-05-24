@@ -42,7 +42,7 @@
         }[d.name] || d.name
       }
       const t = new Date().toLocaleTimeString()
-      diagEvents = [`${t}  ${label}`, ...diagEvents].slice(0, 8)
+      diagEvents = [`${t}  ${label}`, ...diagEvents].slice(0, 20)
     }
   }
 

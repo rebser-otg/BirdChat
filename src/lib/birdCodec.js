@@ -279,6 +279,11 @@ function getReferenceChirps(sampleRate) {
  * @param {number} sampleRate
  * @returns {number[]|null}  [sym0, sym1, sym2, sym3] or null if unresolvable / silent
  */
+// Correlation stride: skip samples in the matched-filter dot product.  All chirp
+// frequencies are < ~4 kHz, so a stride of 4 (≈12 kHz effective at 48 kHz) is
+// well above Nyquist and ~4× faster — important to stay real-time on slow CPUs.
+const CORR_STRIDE = 4
+
 export function detectFrame(samples, sampleRate, diag = null) {
   if (diag) { diag.score = 0; diag.bands = [0, 0, 0, 0] }  // diagnostics: best total + per-band
   const SILENCE_N = Math.round(sampleRate * 30 / 1000)  // 30 ms for silence check
@@ -329,8 +334,13 @@ export function detectFrame(samples, sampleRate, diag = null) {
 
       for (let s = 0; s < 16; s++) {
         const ref = bandRefs[s]
+        // Strided correlation: all chirps are well below ~4 kHz, so sampling the
+        // dot product every CORR_STRIDE samples (≈12 kHz effective) loses no
+        // accuracy but cuts the detector's cost ~4×, keeping it real-time on
+        // slower devices.  Scale by the stride so scores stay comparable.
         let dot = 0
-        for (let i = 0; i < dN; i++) dot += frameWin[i] * ref[i]
+        for (let i = 0; i < dN; i += CORR_STRIDE) dot += frameWin[i] * ref[i]
+        dot *= CORR_STRIDE
         if (dot > bestDot) { bestDot = dot; bestSym = s }
       }
 
