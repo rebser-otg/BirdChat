@@ -33,9 +33,10 @@
         'frame':         '▫️ data frame',
         'decoded':       `✅ decoded ${d.detail} bytes`,
         'checksum-fail': '❌ checksum failed (partial signal)',
+        'frame-score':   `📶 data signal = ${d.detail} (need ≥1500)`,
       }[d.name] || d.name
       const t = new Date().toLocaleTimeString()
-      diagEvents = [`${t}  ${label}`, ...diagEvents].slice(0, 6)
+      diagEvents = [`${t}  ${label}`, ...diagEvents].slice(0, 8)
     }
   }
 

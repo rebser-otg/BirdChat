@@ -237,7 +237,8 @@ export function synthesizeFrame(symbols, sampleRate) {
  * @param {number} sampleRate
  * @returns {number[]|null}  [sym0, sym1, sym2, sym3] or null if unresolvable / silent
  */
-export function detectFrame(samples, sampleRate) {
+export function detectFrame(samples, sampleRate, diag = null) {
+  if (diag) diag.score = 0  // best raw matched-filter score seen (for diagnostics)
   const SILENCE_N = Math.round(sampleRate * 30 / 1000)  // 30 ms for silence check
 
   // True-silence guard: only reject windows that are essentially digital silence.
@@ -251,9 +252,9 @@ export function detectFrame(samples, sampleRate) {
   // Minimum RMS-normalized matched-filter score for a valid detection.
   // Because the frame window is normalized to unit RMS before correlation, the
   // score is amplitude-independent: a clean 4-band frame scores ~10000, a noise
-  // window ~450.  3000 leaves wide margin above noise while tolerating real-world
-  // degradation, and rejects wrong-profile hits on truncated windows.
-  const MIN_FRAME_SCORE = 3000
+  // window ~450.  1500 (≈3× above noise) keeps margin while staying sensitive to
+  // degraded real-world frames, and still rejects wrong-profile hits.
+  const MIN_FRAME_SCORE = 1500
 
   // Try each of the 4 timing profiles; keep the highest-scoring self-consistent candidate.
   // (Shorter profiles can accidentally satisfy the XOR check with wrong symbols;
@@ -302,8 +303,9 @@ export function detectFrame(samples, sampleRate) {
 
     // Self-consistency check: profile derived from symbols must match the tried profile.
     const computedProfile = (syms[0] ^ syms[1] ^ syms[2] ^ syms[3]) & 0x3
+    const score = scores[0] + scores[1] + scores[2] + scores[3]
+    if (diag && score > diag.score) diag.score = score  // raw best across all profiles
     if (computedProfile === p) {
-      const score = scores[0] + scores[1] + scores[2] + scores[3]
       if (score > bestScore) { bestScore = score; bestSyms = syms.slice() }
     }
   }
@@ -417,11 +419,16 @@ export function createDecoder(sampleRate, onBytes, onEvent = null) {
   const PREAMBLE_THRESHOLD = 150
   const SILENCE_FLOOR      = 1e-7  // total window energy below this = digital silence
 
+  // After a preamble, if this many full-window frame detections fail in a row,
+  // assume the data isn't coming and return to IDLE so a fresh preamble re-triggers.
+  const MAX_FRAME_MISSES = 12
+
   // State
   let state = 'IDLE'
   let payloadLen = 0
   let decodedBytes = []
   let framesRemaining = 0
+  let frameMisses = 0
 
   // Linear buffer (grows as chunks arrive; trimmed after each push)
   let buf = new Float32Array(0)
@@ -507,18 +514,26 @@ export function createDecoder(sampleRate, onBytes, onEvent = null) {
 
     const windowN = Math.min(available(), MAX_CHIRP_N)
     const window  = buf.slice(cursor, cursor + windowN)
-    const syms    = detectFrame(window, sampleRate)
+    const diag    = onEvent ? { score: 0 } : null
+    const syms    = detectFrame(window, sampleRate, diag)
 
     if (!syms) {
       if (windowN >= MAX_CHIRP_N) {
-        // Full window but no detection: unexpected noise or corrupted frame.
-        // Advance past it to avoid getting stuck.
+        // Full window but no detection: report how strong the (rejected) match was,
+        // then advance.  A high score that's just under threshold means the signal
+        // is present but marginal; a near-noise score means the data bands aren't
+        // surviving the channel at all.
+        if (diag) emit('frame-score', Math.round(diag.score))
         cursor += ANALYSIS_N
+        // If we keep missing right after a preamble, the length frame isn't coming —
+        // give up and return to IDLE so the next transmission's preamble re-triggers.
+        if (++frameMisses >= MAX_FRAME_MISSES) { _reset() }
         return true
       }
       // Partial window and no detection — wait for more data.
       return false
     }
+    frameMisses = 0
 
     // Frame detected — consume the chirp portion and queue the gap for later.
     const profileIdx = (syms[0] ^ syms[1] ^ syms[2] ^ syms[3]) & 0x3
@@ -579,6 +594,7 @@ export function createDecoder(sampleRate, onBytes, onEvent = null) {
     decodedBytes  = []
     framesRemaining = 0
     skipRemaining   = 0
+    frameMisses     = 0
   }
 
   return {
