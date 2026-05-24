@@ -41,16 +41,20 @@ export function encode(text) {
  * @param {AudioContext} audioContext — caller-managed AudioContext
  * @param {(msg: {name: string, text: string}) => void} onMessage
  */
-export async function startListening(audioContext, onMessage) {
-  _decoder = createDecoder(audioContext.sampleRate, (bytes) => {
-    try {
-      const text = new TextDecoder('utf-8').decode(bytes)
-      const msg  = unpack(text)
-      if (msg) onMessage(msg)
-    } catch {
-      // malformed bytes — drop silently
-    }
-  })
+export async function startListening(audioContext, onMessage, onDiag = null) {
+  _decoder = createDecoder(
+    audioContext.sampleRate,
+    (bytes) => {
+      try {
+        const text = new TextDecoder('utf-8').decode(bytes)
+        const msg  = unpack(text)
+        if (msg) onMessage(msg)
+      } catch {
+        // malformed bytes — drop silently
+      }
+    },
+    onDiag ? (evt) => onDiag({ kind: 'event', ...evt }) : null,
+  )
 
   await audioContext.audioWorklet.addModule(import.meta.env.BASE_URL + 'mic-worklet.js')
 
@@ -72,8 +76,14 @@ export async function startListening(audioContext, onMessage) {
   workletNode = new AudioWorkletNode(audioContext, 'mic-processor')
   workletNode.port.onmessage = (event) => {
     if (event.data.type !== 'pcm') return
+    const chunk = event.data.chunk
+    if (onDiag) {
+      let s = 0
+      for (let i = 0; i < chunk.length; i++) s += chunk[i] * chunk[i]
+      onDiag({ kind: 'level', rms: Math.sqrt(s / chunk.length) })
+    }
     if (Date.now() < _muteUntil) return  // suppress acoustic loopback during transmission
-    _decoder.push(event.data.chunk)
+    _decoder.push(chunk)
   }
 
   source.connect(workletNode)

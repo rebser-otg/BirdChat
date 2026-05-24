@@ -14,6 +14,28 @@
   let sending = $state(false)
   let chatEl = $state(null)
 
+  // Live mic/decoder diagnostics (helps debug real-world reception on-device)
+  let micLevel = $state(0)        // smoothed mic input RMS
+  let diagEvents = $state([])     // recent decoder events (newest first)
+  let listening = $state(false)   // mic actively capturing
+
+  function handleDiag(d) {
+    if (d.kind === 'level') {
+      // Peak meter with decay so the bar is readable
+      micLevel = Math.max(d.rms, micLevel * 0.85)
+    } else if (d.kind === 'event') {
+      const label = {
+        'preamble':      '🔔 preamble detected',
+        'len':           `📏 length = ${d.detail} bytes`,
+        'frame':         '▫️ data frame',
+        'decoded':       `✅ decoded ${d.detail} bytes`,
+        'checksum-fail': '❌ checksum failed (partial signal)',
+      }[d.name] || d.name
+      const t = new Date().toLocaleTimeString()
+      diagEvents = [`${t}  ${label}`, ...diagEvents].slice(0, 6)
+    }
+  }
+
   // Shared AudioContext — created on first user gesture (browser autoplay policy)
   let audioCtx = null
   let engineReady = false
@@ -55,16 +77,25 @@
       try {
         await startListening(audioCtx, (msg) => {
           chatStore.push({ ...msg, mine: false })
-        })
+        }, handleDiag)
         micListening = true
+        listening = true
+        micError = ''
       } catch (err) {
         if (err.name === 'NotAllowedError') {
           micError = "🎙 Microphone access denied — others can't send to you, but you can still tweet."
+        } else if (err.name === 'NotFoundError') {
+          micError = "🎙 No microphone found — this device can still send tweets, but can't receive them."
         } else {
           micError = `🎙 Microphone error: ${err.message}`
         }
       }
     }
+  }
+
+  // Start receiving without having to send first (mic needs a user gesture).
+  async function startListen() {
+    await ensureAudio()
   }
 
   async function sendMessage() {
@@ -128,6 +159,32 @@
     <div class="error-banner">{micError}</div>
   {/if}
 
+  <!-- Listen prompt — mic needs a user gesture, and the app must be listening
+       to receive (it no longer auto-starts only on send). -->
+  {#if !listening && !initError}
+    <button class="listen-btn" onclick={startListen}>🎧 Tap to listen for tweets</button>
+  {/if}
+
+  <!-- Live diagnostics: confirms the mic is hearing the chirps and shows decode events -->
+  {#if listening}
+    <div class="diag">
+      <div class="diag-level">
+        <span class="diag-label">🎙 mic</span>
+        <div class="level-bar">
+          <div class="level-fill" style="width:{Math.min(100, micLevel * 1000)}%"></div>
+        </div>
+        <span class="diag-val">{micLevel.toFixed(3)}</span>
+      </div>
+      {#if diagEvents.length}
+        <div class="diag-events">
+          {#each diagEvents as ev}<div class="diag-event">{ev}</div>{/each}
+        </div>
+      {:else}
+        <div class="diag-hint">Listening… play a tweet from another device.</div>
+      {/if}
+    </div>
+  {/if}
+
   <!-- Chat bubbles -->
   <main class="chat" bind:this={chatEl}>
     {#each messages as msg (msg.id)}
@@ -163,3 +220,55 @@
     </button>
   </footer>
 </div>
+
+<style>
+  .listen-btn {
+    margin: 10px 16px;
+    padding: 12px;
+    border: none;
+    border-radius: 10px;
+    background: #3d7a3d;
+    color: #fff;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .diag {
+    margin: 8px 16px;
+    padding: 10px 12px;
+    background: rgba(0, 0, 0, 0.25);
+    border-radius: 10px;
+    font-size: 0.8rem;
+    color: #cde3cd;
+  }
+  .diag-level {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .diag-label { white-space: nowrap; }
+  .diag-val {
+    font-variant-numeric: tabular-nums;
+    min-width: 3.2em;
+    text-align: right;
+    opacity: 0.8;
+  }
+  .level-bar {
+    flex: 1;
+    height: 8px;
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .level-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #4caf50, #ffd54f, #ff7043);
+    transition: width 0.06s linear;
+  }
+  .diag-events {
+    margin-top: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+  .diag-event { padding: 1px 0; }
+  .diag-hint { margin-top: 6px; opacity: 0.6; }
+</style>

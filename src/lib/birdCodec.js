@@ -397,7 +397,10 @@ export function encode(bytes, sampleRate) {
  * @param {(bytes: Uint8Array) => void} onBytes
  * @returns {{ push(chunk: Float32Array): void, reset(): void }}
  */
-export function createDecoder(sampleRate, onBytes) {
+export function createDecoder(sampleRate, onBytes, onEvent = null) {
+  // Optional diagnostic hook: emit('preamble' | 'len' | 'frame' | 'decoded' | 'checksum-fail', detail)
+  const emit = onEvent ? (name, detail) => onEvent({ name, detail }) : () => {}
+
   // Timing constants
   const PREAMBLE_SLOT_N = Math.round(sampleRate * (PREAMBLE_DURATION_MS + PREAMBLE_GAP_MS) / 1000)
   const POST_GAP_N      = Math.round(sampleRate * POST_PREAMBLE_GAP_MS / 1000)
@@ -467,6 +470,7 @@ export function createDecoder(sampleRate, onBytes) {
       if (preambleRatio(cursor + PREAMBLE_SLOT_N) > PREAMBLE_THRESHOLD) {
         cursor += 2 * PREAMBLE_SLOT_N + POST_GAP_N
         state = 'READING_LEN'
+        emit('preamble')
         return true
       }
     }
@@ -536,12 +540,14 @@ export function createDecoder(sampleRate, onBytes) {
       decodedBytes    = []
       framesRemaining = Math.ceil(payloadLen / 2)
       state           = 'READING_DATA'
+      emit('len', payloadLen)
       return true
     }
 
     if (state === 'READING_DATA') {
       decodedBytes.push(b0, b1)
       framesRemaining--
+      emit('frame')
       if (framesRemaining === 0) state = 'READING_CHECKSUM'
       return true
     }
@@ -553,7 +559,10 @@ export function createDecoder(sampleRate, onBytes) {
       let xorCheck = 0
       for (const byte of payload) xorCheck ^= byte
       if (xorCheck === rxChecksum && rxLenEcho === payloadLen) {
+        emit('decoded', payload.length)
         onBytes(payload)
+      } else {
+        emit('checksum-fail')
       }
       _reset()
       return true
