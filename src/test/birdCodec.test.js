@@ -1,8 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   BANDS,
-  SYMBOL_DURATION_MS,
-  SYMBOL_GAP_MS,
+  FRAME_PROFILES,
   PREAMBLE_DURATION_MS,
   PREAMBLE_GAP_MS,
   POST_PREAMBLE_GAP_MS,
@@ -12,6 +11,18 @@ import {
   bytePairToSymbols,
   encode,
 } from '../lib/birdCodec.js'
+
+// Helper: slot length in samples for a given symbols array
+function slotSamples(syms, sr = SR) {
+  const p = FRAME_PROFILES[(syms[0] ^ syms[1] ^ syms[2] ^ syms[3]) & 0x3]
+  return Math.round(sr * (p.durationMs + p.gapMs) / 1000)
+}
+
+// Helper: chirp-only length (no gap) for a given symbols array
+function chirpSamples(syms, sr = SR) {
+  const p = FRAME_PROFILES[(syms[0] ^ syms[1] ^ syms[2] ^ syms[3]) & 0x3]
+  return Math.round(sr * p.durationMs / 1000)
+}
 
 const SR = 48000
 
@@ -38,10 +49,17 @@ describe('synthesizeFrame', () => {
     expect(synthesizeFrame([0, 0, 0, 0], SR)).toBeInstanceOf(Float32Array)
   })
 
-  it('has the correct frame slot length (chirp + gap)', () => {
-    const frame    = synthesizeFrame([0, 0, 0, 0], SR)
-    const expected = Math.round(SR * (SYMBOL_DURATION_MS + SYMBOL_GAP_MS) / 1000)
-    expect(frame.length).toBe(expected)
+  it('has the correct frame slot length based on timing profile', () => {
+    const syms  = [0, 0, 0, 0]     // profile = (0^0^0^0)&3 = 0 → FRAME_PROFILES[0]
+    const frame = synthesizeFrame(syms, SR)
+    expect(frame.length).toBe(slotSamples(syms))
+  })
+
+  it('different symbol sets produce different frame lengths (profile variation)', () => {
+    // profile 0 vs profile 3 must differ in length
+    const syms0 = [0, 0, 0, 0]    // XOR = 0 → profile 0 (shortest)
+    const syms3 = [0, 0, 0, 3]    // XOR = 3 → profile 3 (longest)
+    expect(synthesizeFrame(syms0, SR).length).toBeLessThan(synthesizeFrame(syms3, SR).length)
   })
 
   it('amplitude stays within [-1, 1]', () => {
@@ -53,8 +71,9 @@ describe('synthesizeFrame', () => {
   })
 
   it('gap portion (after chirp) is silent', () => {
-    const chirpN = Math.round(SR * SYMBOL_DURATION_MS / 1000)
-    const frame  = synthesizeFrame([0, 0, 0, 0], SR)
+    const syms   = [0, 0, 0, 0]
+    const chirpN = chirpSamples(syms)
+    const frame  = synthesizeFrame(syms, SR)
     for (let i = chirpN; i < frame.length; i++) {
       expect(frame[i]).toBe(0)
     }
@@ -145,21 +164,30 @@ describe('encode', () => {
   })
 
   it('has the correct total sample count for a 2-byte payload', () => {
-    // Wire layout: preamble×2 + post-preamble-gap + len frame + 1 data frame + checksum frame
+    // Wire layout: preamble×2 + post-preamble gap + len frame + 1 data frame + checksum frame
+    // Each frame length is profile-dependent: (sym0^sym1^sym2^sym3)&3 picks the profile.
+    const bytes       = new Uint8Array([0x48, 0x69])
+    const checksum    = bytes[0] ^ bytes[1]
     const preambleLen = Math.round(SR * (PREAMBLE_DURATION_MS + PREAMBLE_GAP_MS) / 1000)
-    const frameLen    = Math.round(SR * (SYMBOL_DURATION_MS  + SYMBOL_GAP_MS)     / 1000)
     const gapLen      = Math.round(SR * POST_PREAMBLE_GAP_MS / 1000)
-    const expected    = 2 * preambleLen + gapLen + 3 * frameLen  // len + 1 data + checksum
-    expect(encode(new Uint8Array([0x48, 0x69]), SR).length).toBe(expected)
+    const lenFrame    = slotSamples(bytePairToSymbols(bytes.length, 0))
+    const dataFrame   = slotSamples(bytePairToSymbols(bytes[0], bytes[1]))
+    const cksFrame    = slotSamples(bytePairToSymbols(checksum, bytes.length))
+    const expected    = 2 * preambleLen + gapLen + lenFrame + dataFrame + cksFrame
+    expect(encode(bytes, SR).length).toBe(expected)
   })
 
   it('has the correct total sample count for a 3-byte payload (odd — zero-padded)', () => {
-    // 3 bytes → 2 data frames (zero-padded to even)
+    const bytes    = new Uint8Array([0x41, 0x42, 0x43])
+    const checksum = bytes[0] ^ bytes[1] ^ bytes[2]
     const preambleLen = Math.round(SR * (PREAMBLE_DURATION_MS + PREAMBLE_GAP_MS) / 1000)
-    const frameLen    = Math.round(SR * (SYMBOL_DURATION_MS  + SYMBOL_GAP_MS)     / 1000)
     const gapLen      = Math.round(SR * POST_PREAMBLE_GAP_MS / 1000)
-    const expected    = 2 * preambleLen + gapLen + 4 * frameLen  // len + 2 data + checksum
-    expect(encode(new Uint8Array([0x41, 0x42, 0x43]), SR).length).toBe(expected)
+    const lenFrame    = slotSamples(bytePairToSymbols(bytes.length, 0))
+    const dataFrame1  = slotSamples(bytePairToSymbols(bytes[0], bytes[1]))
+    const dataFrame2  = slotSamples(bytePairToSymbols(bytes[2], 0))  // zero-padded
+    const cksFrame    = slotSamples(bytePairToSymbols(checksum, bytes.length))
+    const expected    = 2 * preambleLen + gapLen + lenFrame + dataFrame1 + dataFrame2 + cksFrame
+    expect(encode(bytes, SR).length).toBe(expected)
   })
 
   it('starts with the preamble signal', () => {

@@ -11,18 +11,32 @@
  * Wire format:
  *   [PREAMBLE ×2] [LEN frame] [DATA frames...] [CHECKSUM frame]
  *
- * Each frame: 120 ms chirps + 20 ms silence = 140 ms slot
- * Throughput: 16 bits / 140 ms ≈ 14.3 bytes/sec
- * 100-byte message ≈ 7–8 seconds + 0.7 s preamble
+ * Each frame uses one of four timing profiles chosen from the frame's own data bits
+ * (see FRAME_PROFILES). Average slot ≈ 143 ms → ~14.0 bytes/sec.
+ * 100-byte message ≈ 7–8 seconds + 0.7 s preamble.
  */
 
 // ---------------------------------------------------------------------------
-// Timing
+// Timing — four profiles create natural rhythm (staccato snaps → held notes)
 // ---------------------------------------------------------------------------
 
-export const SYMBOL_DURATION_MS = 120  // chirp duration; reduce to ~80 ms once proven reliable
-export const SYMBOL_GAP_MS      = 20   // silence between frames
-export const FRAME_SLOT_MS      = SYMBOL_DURATION_MS + SYMBOL_GAP_MS
+/**
+ * Four timing profiles for data frames.
+ *
+ * Profile index = (sym0 ^ sym1 ^ sym2 ^ sym3) & 0x3 — derived entirely from
+ * the frame's own data bits, so the timing variation is deterministic and the
+ * decoder doesn't need to track it (it re-derives the profile from frequency
+ * content it already decoded). This gives free rhythm variation: messages
+ * sound like phrases of short snaps and held whistles, not a metronome.
+ *
+ * Average slot across equally-likely profiles: (95+125+155+195)/4 = 142.5 ms
+ */
+export const FRAME_PROFILES = [
+  { durationMs:  80, gapMs: 15 },  // 0 — staccato snap
+  { durationMs: 105, gapMs: 20 },  // 1 — short call
+  { durationMs: 130, gapMs: 25 },  // 2 — natural note
+  { durationMs: 160, gapMs: 35 },  // 3 — held note
+]
 
 // ---------------------------------------------------------------------------
 // Band definitions
@@ -140,8 +154,11 @@ export function synthesizePreamble(sampleRate) {
  * @returns {Float32Array}  Length = FRAME_SLOT_MS * sampleRate / 1000 samples
  */
 export function synthesizeFrame(symbols, sampleRate) {
-  const chirpN = Math.round(sampleRate * SYMBOL_DURATION_MS / 1000)
-  const gapN   = Math.round(sampleRate * SYMBOL_GAP_MS / 1000)
+  // Timing profile: derived from XOR of all four symbols — no extra decoder work needed.
+  const profileIdx   = (symbols[0] ^ symbols[1] ^ symbols[2] ^ symbols[3]) & 0x3
+  const { durationMs, gapMs } = FRAME_PROFILES[profileIdx]
+  const chirpN = Math.round(sampleRate * durationMs / 1000)
+  const gapN   = Math.round(sampleRate * gapMs   / 1000)
   const frame  = new Float32Array(chirpN + gapN)  // gap portion stays zero
 
   for (let b = 0; b < 4; b++) {
@@ -156,7 +173,7 @@ export function synthesizeFrame(symbols, sampleRate) {
     // Deterministic per-chirp variation: makes each of the 64 (4 bands × 16 symbols) chirps
     // have a slightly different envelope/harmonic character — no two chirps sound identical.
     const variation    = (sym * 3 + b * 7) & 0xF
-    const chirp        = synthesizeChirp(fStart, fEnd, SYMBOL_DURATION_MS, sampleRate, variation)
+    const chirp        = synthesizeChirp(fStart, fEnd, durationMs, sampleRate, variation)
 
     for (let i = 0; i < chirpN; i++) frame[i] += chirp[i]
   }
