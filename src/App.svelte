@@ -27,14 +27,20 @@
       // Peak meter with decay so the bar is readable
       micLevel = Math.max(d.rms, micLevel * 0.85)
     } else if (d.kind === 'event') {
-      const label = {
-        'preamble':      '🔔 preamble detected',
-        'len':           `📏 length = ${d.detail} bytes`,
-        'frame':         '▫️ data frame',
-        'decoded':       `✅ decoded ${d.detail} bytes`,
-        'checksum-fail': '❌ checksum failed (partial signal)',
-        'frame-score':   `📶 data signal = ${d.detail} (need ≥1500)`,
-      }[d.name] || d.name
+      let label
+      if (d.name === 'frame-score') {
+        const b = d.detail.bands
+        // per-band match strength — reveals whether ALL 4 bands survive or some are dead
+        label = `📶 signal ${d.detail.total} [B0:${b[0]} B1:${b[1]} B2:${b[2]} B3:${b[3]}] (need ≥1500)`
+      } else {
+        label = {
+          'preamble':      '🔔 preamble detected',
+          'len':           `📏 length = ${d.detail} bytes`,
+          'frame':         '▫️ data frame',
+          'decoded':       `✅ decoded ${d.detail} bytes`,
+          'checksum-fail': '❌ checksum failed (partial signal)',
+        }[d.name] || d.name
+      }
       const t = new Date().toLocaleTimeString()
       diagEvents = [`${t}  ${label}`, ...diagEvents].slice(0, 8)
     }

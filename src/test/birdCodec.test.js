@@ -197,7 +197,8 @@ describe('encode', () => {
     const lenFrame    = slotSamples(bytePairToSymbols(bytes.length, 0))
     const dataFrame   = slotSamples(bytePairToSymbols(bytes[0], bytes[1]))
     const cksFrame    = slotSamples(bytePairToSymbols(checksum, bytes.length))
-    const expected    = 2 * preambleLen + gapLen + lenFrame + dataFrame + cksFrame
+    const trailing    = Math.round(SR * FRAME_PROFILES[3].durationMs / 1000)  // trailing silence
+    const expected    = 2 * preambleLen + gapLen + lenFrame + dataFrame + cksFrame + trailing
     expect(encode(bytes, SR).length).toBe(expected)
   })
 
@@ -210,7 +211,8 @@ describe('encode', () => {
     const dataFrame1  = slotSamples(bytePairToSymbols(bytes[0], bytes[1]))
     const dataFrame2  = slotSamples(bytePairToSymbols(bytes[2], 0))  // zero-padded
     const cksFrame    = slotSamples(bytePairToSymbols(checksum, bytes.length))
-    const expected    = 2 * preambleLen + gapLen + lenFrame + dataFrame1 + dataFrame2 + cksFrame
+    const trailing    = Math.round(SR * FRAME_PROFILES[3].durationMs / 1000)  // trailing silence
+    const expected    = 2 * preambleLen + gapLen + lenFrame + dataFrame1 + dataFrame2 + cksFrame + trailing
     expect(encode(bytes, SR).length).toBe(expected)
   })
 
@@ -304,14 +306,15 @@ describe('createDecoder', () => {
     const input = new Uint8Array([0x48, 0x69])
     const pcm   = encode(input, SR)
     // Locate the checksum chirp and silence it entirely.
-    // (The last section of the PCM is [checksum chirp][checksum gap].
-    //  Zeroing only the gap — which is already silent — would not corrupt anything.)
+    // (The PCM tail is [checksum chirp][checksum gap][trailing silence].
+    //  Zeroing only silent regions would not corrupt anything.)
     const checksum  = input[0] ^ input[1]
     const cksSyms   = bytePairToSymbols(checksum, input.length)
     const cksProf   = FRAME_PROFILES[(cksSyms[0] ^ cksSyms[1] ^ cksSyms[2] ^ cksSyms[3]) & 0x3]
+    const trailing  = Math.round(SR * FRAME_PROFILES[3].durationMs / 1000)
     const cksGapN   = Math.round(SR * cksProf.gapMs   / 1000)
     const cksChirpN = Math.round(SR * cksProf.durationMs / 1000)
-    const chirpStart = pcm.length - cksGapN - cksChirpN
+    const chirpStart = pcm.length - trailing - cksGapN - cksChirpN
     for (let i = chirpStart; i < chirpStart + cksChirpN; i++) pcm[i] = 0
     let called = false
     const dec  = createDecoder(SR, () => { called = true })

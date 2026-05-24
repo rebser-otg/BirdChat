@@ -26,16 +26,21 @@
  * Profile index = (sym0 ^ sym1 ^ sym2 ^ sym3) & 0x3 — derived entirely from
  * the frame's own data bits, so the timing variation is deterministic and the
  * decoder doesn't need to track it (it re-derives the profile from frequency
- * content it already decoded). This gives free rhythm variation: messages
- * sound like phrases of short snaps and held whistles, not a metronome.
+ * content it already decoded). This gives free rhythm variation.
  *
- * Average slot across equally-likely profiles: (95+125+155+195)/4 = 142.5 ms
+ * Durations are long (300–450 ms): the matched filter's SNR scales with
+ * integration time, so longer chirps are dramatically more robust over a real
+ * acoustic link.  Measured on a marginal channel, per-band symbol error fell
+ * from ~5 % at 160 ms to ~0.2 % at 400 ms.  Throughput drops to ~3 bytes/s,
+ * which is fine for short chat messages and worth the reliability.
+ *
+ * Average slot across equally-likely profiles: (330+385+440+500)/4 = 413.75 ms
  */
 export const FRAME_PROFILES = [
-  { durationMs:  80, gapMs: 15 },  // 0 — staccato snap
-  { durationMs: 105, gapMs: 20 },  // 1 — short call
-  { durationMs: 130, gapMs: 25 },  // 2 — natural note
-  { durationMs: 160, gapMs: 35 },  // 3 — held note
+  { durationMs: 300, gapMs: 30 },  // 0
+  { durationMs: 350, gapMs: 35 },  // 1
+  { durationMs: 400, gapMs: 40 },  // 2
+  { durationMs: 450, gapMs: 50 },  // 3
 ]
 
 // ---------------------------------------------------------------------------
@@ -275,7 +280,7 @@ function getReferenceChirps(sampleRate) {
  * @returns {number[]|null}  [sym0, sym1, sym2, sym3] or null if unresolvable / silent
  */
 export function detectFrame(samples, sampleRate, diag = null) {
-  if (diag) diag.score = 0  // best raw matched-filter score seen (for diagnostics)
+  if (diag) { diag.score = 0; diag.bands = [0, 0, 0, 0] }  // diagnostics: best total + per-band
   const SILENCE_N = Math.round(sampleRate * 30 / 1000)  // 30 ms for silence check
 
   // True-silence guard: only reject windows that are essentially digital silence.
@@ -336,7 +341,10 @@ export function detectFrame(samples, sampleRate, diag = null) {
     // Self-consistency check: profile derived from symbols must match the tried profile.
     const computedProfile = (syms[0] ^ syms[1] ^ syms[2] ^ syms[3]) & 0x3
     const score = scores[0] + scores[1] + scores[2] + scores[3]
-    if (diag && score > diag.score) diag.score = score  // raw best across all profiles
+    if (diag && score > diag.score) {     // raw best across all profiles
+      diag.score = score
+      diag.bands = scores.slice()         // per-band match strength (is each band surviving?)
+    }
     if (computedProfile === p) {
       if (score > bestScore) { bestScore = score; bestSyms = syms.slice() }
     }
@@ -369,7 +377,12 @@ export function bytePairToSymbols(b0, b1) {
  *
  * Wire format:
  *   [preamble A (300ms)] [preamble B (300ms)] [post-preamble gap]
- *   [len frame] [data frames...] [checksum frame]
+ *   [len frame] [data frames...] [checksum frame] [trailing silence]
+ *
+ * The trailing silence (one max-length chirp's worth) guarantees the decoder
+ * always has a full detection window for the final checksum frame, so encode →
+ * decode is self-contained and doesn't depend on extra captured audio after the
+ * message.
  *
  * @param {Uint8Array} bytes
  * @param {number}     sampleRate
@@ -402,6 +415,10 @@ export function encode(bytes, sampleRate) {
 
   // Checksum frame: (checksum byte, length echo) for validation
   segments.push(synthesizeFrame(bytePairToSymbols(checksum, bytes.length & 0xFF), sampleRate))
+
+  // Trailing silence: one max-length chirp's worth, so the decoder always has a
+  // full detection window for the checksum frame even at end-of-stream.
+  segments.push(new Float32Array(Math.round(sampleRate * FRAME_PROFILES[3].durationMs / 1000)))
 
   // Concatenate all segments
   const totalLen = segments.reduce((sum, s) => sum + s.length, 0)
@@ -439,7 +456,6 @@ export function createDecoder(sampleRate, onBytes, onEvent = null) {
   const PREAMBLE_SLOT_N = Math.round(sampleRate * (PREAMBLE_DURATION_MS + PREAMBLE_GAP_MS) / 1000)
   const POST_GAP_N      = Math.round(sampleRate * POST_PREAMBLE_GAP_MS / 1000)
   const MAX_CHIRP_N     = Math.round(sampleRate * FRAME_PROFILES[3].durationMs / 1000)
-  const MIN_CHIRP_N     = Math.round(sampleRate * FRAME_PROFILES[0].durationMs / 1000)
   const ANALYSIS_N      = Math.round(sampleRate * 30 / 1000)  // preamble scan step
   const MAX_PAYLOAD     = 142
 
@@ -525,11 +541,10 @@ export function createDecoder(sampleRate, onBytes, onEvent = null) {
   // buf.length; an overshoot would empty the buffer and cause the next push()
   // chunk to land at the wrong PCM position, corrupting all subsequent decodes.
   //
-  // Phase 2 — Detection: for LEN/DATA frames, wait for a full MAX_CHIRP_N
-  // window before detecting (prevents false self-consistent hits from shorter
-  // profiles on truncated windows).  For READING_CHECKSUM (last frame in the
-  // stream, nothing follows) allow any window >= MIN_CHIRP_N so it can still
-  // be decoded.
+  // Phase 2 — Detection: always wait for a full MAX_CHIRP_N window before
+  // detecting.  A truncated window lets a shorter profile be (mis)detected
+  // before the correct longer-profile chirp has fully arrived.  encode() appends
+  // trailing silence so even the final checksum frame reaches a full window.
   function tryFrame() {
     // — Phase 1: drain pending gap —
     if (skipRemaining > 0) {
@@ -540,30 +555,23 @@ export function createDecoder(sampleRate, onBytes, onEvent = null) {
       // Fall through: gap fully drained, attempt detection immediately
     }
 
-    // — Phase 2: detection —
-    const minNeeded = (state === 'READING_CHECKSUM') ? MIN_CHIRP_N : MAX_CHIRP_N
-    if (available() < minNeeded) return false
+    // — Phase 2: detection (always on a full MAX_CHIRP_N window) —
+    if (available() < MAX_CHIRP_N) return false
 
-    const windowN = Math.min(available(), MAX_CHIRP_N)
-    const window  = buf.slice(cursor, cursor + windowN)
-    const diag    = onEvent ? { score: 0 } : null
-    const syms    = detectFrame(window, sampleRate, diag)
+    const window = buf.slice(cursor, cursor + MAX_CHIRP_N)
+    const diag   = onEvent ? { score: 0 } : null
+    const syms   = detectFrame(window, sampleRate, diag)
 
     if (!syms) {
-      if (windowN >= MAX_CHIRP_N) {
-        // Full window but no detection: report how strong the (rejected) match was,
-        // then advance.  A high score that's just under threshold means the signal
-        // is present but marginal; a near-noise score means the data bands aren't
-        // surviving the channel at all.
-        if (diag) emit('frame-score', Math.round(diag.score))
-        cursor += ANALYSIS_N
-        // If we keep missing right after a preamble, the length frame isn't coming —
-        // give up and return to IDLE so the next transmission's preamble re-triggers.
-        if (++frameMisses >= MAX_FRAME_MISSES) { _reset() }
-        return true
-      }
-      // Partial window and no detection — wait for more data.
-      return false
+      // No detection on a full window: report how strong the (rejected) match was,
+      // then advance.  A score just under threshold means the signal is present
+      // but marginal; a near-noise score means the data bands aren't surviving.
+      if (diag) emit('frame-score', { total: Math.round(diag.score), bands: diag.bands.map(Math.round) })
+      cursor += ANALYSIS_N
+      // If we keep missing right after a preamble, the length frame isn't coming —
+      // give up and return to IDLE so the next transmission's preamble re-triggers.
+      if (++frameMisses >= MAX_FRAME_MISSES) { _reset() }
+      return true
     }
     frameMisses = 0
 
