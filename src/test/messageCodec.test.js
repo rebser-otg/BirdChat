@@ -21,8 +21,20 @@ describe('pack', () => {
     expect(result.t.length).toBe(MAX_TEXT_LENGTH)
   })
 
-  it('total byte length stays within 140 bytes', () => {
+  it('total byte length stays within 140 bytes even with all-emoji input', () => {
+    const packed = pack({ name: '🐦'.repeat(MAX_NAME_LENGTH), text: '🐦'.repeat(MAX_TEXT_LENGTH) })
+    expect(new TextEncoder().encode(packed).length).toBeLessThanOrEqual(140)
+  })
+})
+
+describe('pack byte safety', () => {
+  it('does not exceed 140 bytes with max ASCII input', () => {
     const packed = pack({ name: 'A'.repeat(MAX_NAME_LENGTH), text: 'B'.repeat(MAX_TEXT_LENGTH) })
+    expect(new TextEncoder().encode(packed).length).toBeLessThanOrEqual(140)
+  })
+
+  it('does not exceed 140 bytes with all-CJK input', () => {
+    const packed = pack({ name: '中'.repeat(MAX_NAME_LENGTH), text: '中'.repeat(MAX_TEXT_LENGTH) })
     expect(new TextEncoder().encode(packed).length).toBeLessThanOrEqual(140)
   })
 })
